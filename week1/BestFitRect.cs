@@ -84,10 +84,10 @@ namespace week1
                 double minArea = result.Area;
                 Debug.WriteLine($"Minimum enclosing rectangle area: {minArea}");
 
-                // Set showRectangle2 to true to trigger the drawing of the rectangle
+                
                 showRectangle2 = true;
 
-                // Trigger repaint
+               
                 Invalidate();
             }
         }
@@ -111,7 +111,7 @@ namespace week1
             base.OnPaint(e);
             using (Graphics g = e.Graphics)
             {
-                // Draw grid (border lines)
+
                 using (Pen p = new Pen(Color.Gray))
                 {
                     g.DrawLine(p, 35, 60, 550, 60);
@@ -120,7 +120,7 @@ namespace week1
                     g.DrawLine(p, 550, 400, 35, 400);
                 }
 
-                // Draw the dots
+           
                 if (dotCoordinates != null && dotCoordinates.Any())
                 {
                     using (SolidBrush brush = new SolidBrush(Color.Blue))
@@ -140,7 +140,7 @@ namespace week1
                     }
                 }
 
-                // Draw the minimum enclosing rectangle
+            
                 if (showRectangle2)
                 {
                     using (Pen pen = new Pen(Color.Green))

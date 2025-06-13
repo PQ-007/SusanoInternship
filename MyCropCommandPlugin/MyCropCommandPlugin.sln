@@ -1,0 +1,25 @@
+﻿
+Microsoft Visual Studio Solution File, Format Version 12.00
+# Visual Studio Version 17
+VisualStudioVersion = 17.14.36202.13 d17.14
+MinimumVisualStudioVersion = 10.0.40219.1
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "MyCropCommandPlugin", "MyCropCommandPlugin.csproj", "{63775C53-CEEF-4A3B-A5E6-FF5C98804F6D}"
+EndProject
+Global
+	GlobalSection(SolutionConfigurationPlatforms) = preSolution
+		Debug|Any CPU = Debug|Any CPU
+		Release|Any CPU = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(ProjectConfigurationPlatforms) = postSolution
+		{63775C53-CEEF-4A3B-A5E6-FF5C98804F6D}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{63775C53-CEEF-4A3B-A5E6-FF5C98804F6D}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{63775C53-CEEF-4A3B-A5E6-FF5C98804F6D}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{63775C53-CEEF-4A3B-A5E6-FF5C98804F6D}.Release|Any CPU.Build.0 = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(SolutionProperties) = preSolution
+		HideSolutionNode = FALSE
+	EndGlobalSection
+	GlobalSection(ExtensibilityGlobals) = postSolution
+		SolutionGuid = {122E79EE-6405-4352-89D2-A6F02E54A379}
+	EndGlobalSection
+EndGlobal

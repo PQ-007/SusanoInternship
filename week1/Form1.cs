@@ -1,26 +1,31 @@
 ﻿using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Drawing;
 using System.Linq;
+using System.Reflection;
 using System.Windows.Forms;
-using System.Diagnostics;
 
 namespace week1
 {
     public partial class Form1 : Form
     {
         private int dotNum = 0;
-        private Point[] convexHullPoints;
+        List<Point> convexHullPoints;
+        private Point[] resultPoints;
         private List<Point> dotCoordinates;
         private Random random = new Random();
         private int rectX, rectY, rectWidth, rectHeight;
-        private bool showRectangle = false;
-        private bool showRectangle2 = false;
+        private bool show1 = false;
+        private bool show2 = false;
+        private bool show3 = false;
+        private bool dotPainted = true;
 
         public Form1()
         {
             InitializeComponent();
             dotCoordinates = new List<Point>();
+            convexHullPoints = new List<Point>();
         }
         private void Form1_Load(object sender, EventArgs e)
         {
@@ -28,8 +33,7 @@ namespace week1
         private void random_Click(object sender, EventArgs e)
         {
             dotCoordinates.Clear();
-            showRectangle = false;
-            showRectangle2 = false;
+            convexHullPoints.Clear();
 
             if (dotNum > 0)
             {
@@ -41,9 +45,11 @@ namespace week1
                     dotCoordinates.Add(new Point(x, y));
                 }
                 Debug.WriteLine($"Generated {dotCoordinates.Count} dots.");
+                dotPainted = false;
             }
-            else
-            {
+            else if(dotCoordinates.Count() > 0)
+            {   
+                
                 MessageBox.Show("Please enter a number greater than 0 for dots.", "Input Error", MessageBoxButtons.OK, MessageBoxIcon.Warning);
             }
 
@@ -52,7 +58,8 @@ namespace week1
         private void minRect1_Click(object sender, EventArgs e)
         {
             Debug.WriteLine("minRect1 button clicked.");
-            showRectangle2 = false;
+            show2 = false;
+            show3 = false;
 
             if (dotCoordinates.Any())
             {
@@ -67,7 +74,7 @@ namespace week1
                 rectX = minX;
                 rectY = minY;
 
-                showRectangle = true;
+                show1 = true;
                 Debug.WriteLine($"Min X: {minX}, Min Y: {minY}, Width: {rectWidth}, Height: {rectHeight}");
 
                 Invalidate();
@@ -75,12 +82,12 @@ namespace week1
         }
         private void minRect2_Click(object sender, EventArgs e)
         {
-            showRectangle = false;
-
+            show1 = false;
+            show3 = false;
             if (dotCoordinates.Any())
             {
                 var result = ConvexHull.FindMinimumEnclosingRectangle(dotCoordinates);
-                convexHullPoints = result.RectanglePoints;
+                resultPoints = result.RectanglePoints;
                 Debug.WriteLine("Minimum Enclosing Rectangle Points:");
                 foreach (Point dot in convexHullPoints)
                 {
@@ -90,11 +97,23 @@ namespace week1
                 double minArea = result.Area;
                 Debug.WriteLine($"Minimum enclosing rectangle area: {minArea}");
 
-                showRectangle2 = true;
+                show2 = true;
 
                 Invalidate();
             }
         }
+        private void minPolygon_Click(object sender, EventArgs e)
+        {   show1 = false;
+            show2 = false;
+            if (convexHullPoints.Any())
+            {
+                Debug.WriteLine("minPolygon button clicked.");
+                convexHullPoints = ConvexHull.FindConvexHull(dotCoordinates);
+                show3 = true;
+                Invalidate();
+            }
+        }
+
         private void textBox1_TextChanged(object sender, EventArgs e)
         {
             string text = textBox1.Text.Trim();
@@ -123,7 +142,7 @@ namespace week1
                     g.DrawLine(p, 550, 400, 35, 400);
                 }
 
-                if (dotCoordinates != null && dotCoordinates.Any())
+                if (dotCoordinates != null && dotCoordinates.Any() && !dotPainted)
                 {
                     using (SolidBrush brush = new SolidBrush(Color.Blue))
                     {
@@ -131,10 +150,11 @@ namespace week1
                         {
                             g.FillEllipse(brush, p.X-5, p.Y-5, 10, 10);
                         }
+                        dotPainted = true;
                     }
                 }
 
-                if (showRectangle)
+                if (show1)
                 {
                     using (Pen rectPen = new Pen(Color.Red))
                     {
@@ -142,11 +162,25 @@ namespace week1
                     }
                 }
 
-                if (showRectangle2 && convexHullPoints != null && convexHullPoints.Length == 4)
+                if (show2 && resultPoints.Length == 4)
                 {
                     using (Pen pen = new Pen(Color.Green, 2))
                     {
-                        g.DrawPolygon(pen, convexHullPoints);
+                        g.DrawPolygon(pen, resultPoints);
+                    }
+                }
+                if (show3)
+                {
+                    
+                    using (Pen pen = new Pen(Color.Purple, 3))
+                    {
+
+                        for(int i = 0; i < convexHullPoints.Count() - 1; i++)
+                        {
+                            g.DrawLine(pen, convexHullPoints[i].X, convexHullPoints[i].Y, convexHullPoints[i + 1].X, convexHullPoints[i + 1].Y);
+                        }
+                        g.DrawLine(pen, convexHullPoints[0].X, convexHullPoints[0].Y, convexHullPoints.Last().X, convexHullPoints.Last().Y);
+
                     }
                 }
             }

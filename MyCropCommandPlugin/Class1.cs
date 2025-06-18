@@ -401,7 +401,7 @@ namespace MAEDA
         {
             Editor ed = Application.DocumentManager.MdiActiveDocument.Editor; // Get editor instance
 
-            double maxDistance = 40000.0;
+            double maxDistance = 30000.0;
 
             // 1. Check candidateLines filtering
             List<Line> candidateLines = blockLines
@@ -450,7 +450,7 @@ namespace MAEDA
                 return new List<Point3d>();
             }
 
-            double geometricTolerance = 0.1;
+            double geometricTolerance = 20.0;
 
             // 4. Check point sorting
             List<Point3d> sortedCellCorners = SortPointsForPolyline(closestFourCorners);

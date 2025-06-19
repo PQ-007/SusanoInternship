@@ -28,13 +28,14 @@ namespace MAEDA
         // Constructor to derive equation from two Point2d
         public LineEquation2D(Point2d p1, Point2d p2)
         {
+            // Calculate coefficients
             A = p2.Y - p1.Y;
             B = p1.X - p2.X;
             C = -A * p1.X - B * p1.Y;
 
             // Normalize the equation (A^2 + B^2 = 1) to make comparison easier
             double magnitude = Math.Sqrt(A * A + B * B);
-            if (magnitude > CommandCropByClick.SmallTolerance) // Use a small, consistent tolerance like 1e-9
+            if (magnitude > CommandCropByClick.SmallTolerance) // Use a small, consistent tolerance like 1e-9 for normalization
             {
                 A /= magnitude;
                 B /= magnitude;
@@ -42,7 +43,7 @@ namespace MAEDA
             }
             else // Degenerate line (points are coincident or too close)
             {
-                A = 0; B = 0; C = 0;
+                A = 0; B = 0; C = 0; // Represents no valid line
             }
         }
 
@@ -51,6 +52,7 @@ namespace MAEDA
         {
             // After normalization, A, B, C should be approximately equal
             // or exactly negative of each other (due to flipped normal vector direction).
+            // This is the check where the main geometricTolerance is critical for 'C'
             bool aEqual = CommandCropByClick.IsEqualTo(this.A, other.A, tolerance);
             bool bEqual = CommandCropByClick.IsEqualTo(this.B, other.B, tolerance);
             bool cEqual = CommandCropByClick.IsEqualTo(this.C, other.C, tolerance);
@@ -73,7 +75,12 @@ namespace MAEDA
     public class CommandCropByClick
     {
         // Define a small tolerance for internal checks like division by zero in normalization
+        // This is for very small numerical checks, not for geometric comparisons.
         public const double SmallTolerance = 1e-9;
+
+        // --- IMPORTANT: Adjust this tolerance for your drawing's precision ---
+        // For large coordinates, this needs to be larger than 0.1
+        private const double geometricTolerance = 10.0; // Increased tolerance
 
         // Helper methods for double comparisons with tolerance (made public static)
         public static bool IsEqualTo(double d1, double d2, double tolerance)
@@ -124,6 +131,8 @@ namespace MAEDA
                 Point2d p_i = vertices[i];
                 Point2d p_j = vertices[j];
 
+                // Check if the ray from point.Y crosses the segment (p_i.Y, p_j.Y)
+                // And if point.X is to the left of the segment (if it crosses)
                 if (((p_i.Y > point.Y) != (p_j.Y > point.Y)) &&
                     (point.X < (p_j.X - p_i.X) * (point.Y - p_i.Y) / (p_j.Y - p_i.Y) + p_i.X))
                 {
@@ -138,16 +147,26 @@ namespace MAEDA
         /// </summary>
         private static bool IsPointOnSegment2D(Point2d pt, Point2d segStart, Point2d segEnd, double tolerance)
         {
-            // Check collinearity using 2D cross product equivalent
-            Vector2d vec1 = segEnd - segStart;
-            Vector2d vec2 = pt - segStart;
-
-            if (!IsZero(vec1.X * vec2.Y - vec1.Y * vec2.X, tolerance))
+            // 1. Check for degenerate segment (start and end points are very close)
+            if (GetDistance(segStart, segEnd) < SmallTolerance)
             {
-                return false; // Not collinear
+                return GetDistance(pt, segStart) < tolerance; // Is pt coincident with segStart?
             }
 
-            // Check if the point is within the bounding box of the segment (inclusive of tolerance)
+            // 2. Collinearity check: Cross product of (pt - segStart) and (segEnd - segStart)
+            // If collinear, the cross product should be zero.
+            Vector2d vec1 = pt - segStart;
+            Vector2d vec2 = segEnd - segStart;
+            double crossProduct = vec1.X * vec2.Y - vec1.Y * vec2.X;
+
+            // Use the provided tolerance for the IsZero check
+            if (!IsZero(crossProduct, tolerance)) // Crucial for large coords and rotations
+            {
+                return false; // Not collinear within tolerance
+            }
+
+            // 3. Check if point is within the segment's bounding box (inflated by tolerance)
+            // This ensures the point is ON the segment, not just the infinite line.
             double minX = Math.Min(segStart.X, segEnd.X);
             double maxX = Math.Max(segStart.X, segEnd.X);
             double minY = Math.Min(segStart.Y, segEnd.Y);
@@ -165,7 +184,7 @@ namespace MAEDA
             Database db = doc.Database;
             Editor ed = doc.Editor;
 
-            string searchString = "通り符号";
+            string searchString = "通り符号"; // Block name containing the grid lines
 
             BlockReference targetBlockRef = null;
 
@@ -188,6 +207,8 @@ namespace MAEDA
                     if (objId.ObjectClass.Name == "AcDbBlockReference")
                     {
                         BlockReference br = (BlockReference)tr.GetObject(objId, OpenMode.ForRead);
+                        // Check if the block name contains the search string and if it has any lines
+                        // Optimisation: We could check if it has lines later, but good to filter
                         if (br.Name.Contains(searchString))
                         {
                             foundBlockRefs.Add(br);
@@ -201,6 +222,7 @@ namespace MAEDA
                     return;
                 }
 
+                // Find the closest block reference to the clicked point
                 double minDistance = double.MaxValue;
                 foreach (BlockReference br in foundBlockRefs)
                 {
@@ -220,6 +242,7 @@ namespace MAEDA
 
                 ed.WriteMessage($"\n処理対象ブロック: {targetBlockRef.Name} (Handle: {targetBlockRef.Handle}) - クリック点からの距離: {minDistance:F2}");
 
+                // Transform the clicked point to the target block's local coordinate system
                 Matrix3d inverseTransform = targetBlockRef.BlockTransform.Inverse();
                 Point3d clickedPointLocal = clickedPointGlobal.TransformBy(inverseTransform);
                 ed.WriteMessage($"クリックされた点 (ブロックローカル): {clickedPointLocal}");
@@ -227,6 +250,7 @@ namespace MAEDA
                 List<Line> blockLines = new List<Line>();
                 BlockTableRecord btr = (BlockTableRecord)tr.GetObject(targetBlockRef.BlockTableRecord, OpenMode.ForRead);
 
+                // Collect all Line entities within the block definition
                 foreach (ObjectId entityId in btr)
                 {
                     Entity ent = (Entity)tr.GetObject(entityId, OpenMode.ForRead);
@@ -242,7 +266,9 @@ namespace MAEDA
                     return;
                 }
 
-                List<Point3d> originalVertices = FindSurroundingCellPointssForRotatedGrid(clickedPointLocal, blockLines);
+                // --- Core Logic: Find the surrounding cell ---
+                List<Point3d> originalVertices = FindSurroundingCellPointssForRotatedGrid(
+                    clickedPointLocal, blockLines, ed, tr, ms, targetBlockRef); // Pass required objects
 
                 if (originalVertices.Count == 4)
                 {
@@ -250,6 +276,7 @@ namespace MAEDA
 
                     ms.UpgradeOpen();
 
+                    // Transform local cell vertices to global coordinates for drawing
                     List<Point3d> globalOriginalVertices = new List<Point3d>();
                     foreach (Point3d point in originalVertices)
                     {
@@ -257,8 +284,9 @@ namespace MAEDA
                         globalOriginalVertices.Add(transPoint);
                     }
 
+                    // Draw the original detected cell
                     Polyline originalPoly = new Polyline();
-                    originalPoly.ColorIndex = 1; // 赤色
+                    originalPoly.ColorIndex = 1; // Red
                     foreach (Point3d pt in SortPointsForPolyline(globalOriginalVertices))
                     {
                         originalPoly.AddVertexAt(originalPoly.NumberOfVertices, new Point2d(pt.X, pt.Y), 0, 0, 0);
@@ -266,15 +294,17 @@ namespace MAEDA
                     originalPoly.Closed = true;
                     ms.AppendEntity(originalPoly);
                     tr.AddNewlyCreatedDBObject(originalPoly, true);
-                    ed.WriteMessage($"  - オリジナル四角形 (Polyline) が作成されました。");
+                    ed.WriteMessage($"  - オリジナル四角形 (Polyline, 赤色) が作成されました。");
 
-                    double inflatePercentage = 0.05;
+                    // Inflate the rectangle
+                    double inflatePercentage = 0.05; // 5% inflation
                     List<Point3d> inflatedVertices = InflateRectangle(globalOriginalVertices, inflatePercentage);
 
                     if (inflatedVertices.Count == 4)
                     {
+                        // Draw the inflated rectangle
                         Polyline inflatedPoly = new Polyline();
-                        inflatedPoly.ColorIndex = 5; // 青色
+                        inflatedPoly.ColorIndex = 5; // Blue
                         foreach (Point3d pt in SortPointsForPolyline(inflatedVertices))
                         {
                             inflatedPoly.AddVertexAt(inflatedPoly.NumberOfVertices, new Point2d(pt.X, pt.Y), 0, 0, 0);
@@ -282,27 +312,29 @@ namespace MAEDA
                         inflatedPoly.Closed = true;
                         ms.AppendEntity(inflatedPoly);
                         tr.AddNewlyCreatedDBObject(inflatedPoly, true);
-                        ed.WriteMessage($"  - 膨張した四角形 (Polyline) が作成されました (青色)。");
+                        ed.WriteMessage($"  - 膨張した四角形 (Polyline, 青色) が作成されました (5%膨張)。");
 
-                        // --- PointCloudEx の CROP 処理 ---
+                        // --- PointCloudEx CROP Processing ---
                         dynamic targetPointCloud = null;
                         foreach (ObjectId objId in ms)
                         {
+                            // Check for "AcDbPointCloudEx" or other common PointCloud object names
                             if (objId.ObjectClass.Name == "AcDbPointCloudEx" || objId.ObjectClass.Name.Contains("PointCloud"))
                             {
                                 try
                                 {
+                                    // Try to open for write, if it's the right type
                                     targetPointCloud = tr.GetObject(objId, OpenMode.ForWrite);
                                     if (targetPointCloud != null)
                                     {
                                         ed.WriteMessage($"\nPointCloudオブジェクト '{targetPointCloud.ActiveFileName ?? targetPointCloud.GetType().Name}' を見つけました。クロップします。");
-                                        break;
+                                        break; // Found one, exit loop
                                     }
                                 }
                                 catch (System.Exception ex)
                                 {
                                     ed.WriteMessage($"\nWarning: Could not open PointCloud object for write: {ex.Message}");
-                                    targetPointCloud = null;
+                                    targetPointCloud = null; // Reset if failed
                                 }
                             }
                         }
@@ -311,44 +343,69 @@ namespace MAEDA
                         {
                             try
                             {
-                                double clipVolumeHeight = 50000.0;
+                                // Define a large enough height for the clipping volume
+                                double clipVolumeHeight = 50000.0; // Adjust as necessary for your Z extent
 
-                                Point3d p1 = inflatedVertices[0];
-                                Point3d p2 = inflatedVertices[1];
-                                Point3d p3 = inflatedVertices[2];
-                                Point3d p4 = inflatedVertices[3];
-
+                                // Create a Point3dCollection for the clipping boundary vertices
                                 Point3dCollection clipPoints = new Point3dCollection();
-                                clipPoints.Add(new Point3d(p1.X, p1.Y, -clipVolumeHeight / 2.0));
-                                clipPoints.Add(new Point3d(p2.X, p2.Y, -clipVolumeHeight / 2.0));
-                                clipPoints.Add(new Point3d(p3.X, p3.Y, -clipVolumeHeight / 2.0));
-                                clipPoints.Add(new Point3d(p4.X, p4.Y, -clipVolumeHeight / 2.0));
-                                clipPoints.Add(new Point3d(p1.X, p1.Y, -clipVolumeHeight / 2.0));
+                                // Add bottom plane points (from inflated vertices, with negative Z)
+                                clipPoints.Add(new Point3d(inflatedVertices[0].X, inflatedVertices[0].Y, -clipVolumeHeight / 2.0));
+                                clipPoints.Add(new Point3d(inflatedVertices[1].X, inflatedVertices[1].Y, -clipVolumeHeight / 2.0));
+                                clipPoints.Add(new Point3d(inflatedVertices[2].X, inflatedVertices[2].Y, -clipVolumeHeight / 2.0));
+                                clipPoints.Add(new Point3d(inflatedVertices[3].X, inflatedVertices[3].Y, -clipVolumeHeight / 2.0));
+                                // Add first point again to close the bottom polygon
+                                clipPoints.Add(new Point3d(inflatedVertices[0].X, inflatedVertices[0].Y, -clipVolumeHeight / 2.0));
 
-                                clipPoints.Add(new Point3d(p1.X, p1.Y, clipVolumeHeight / 2.0));
-                                clipPoints.Add(new Point3d(p2.X, p2.Y, clipVolumeHeight / 2.0));
-                                clipPoints.Add(new Point3d(p3.X, p3.Y, clipVolumeHeight / 2.0));
-                                clipPoints.Add(new Point3d(p4.X, p4.Y, clipVolumeHeight / 2.0));
-                                clipPoints.Add(new Point3d(p1.X, p1.Y, clipVolumeHeight / 2.0));
+                                // Add top plane points (from inflated vertices, with positive Z)
+                                clipPoints.Add(new Point3d(inflatedVertices[0].X, inflatedVertices[0].Y, clipVolumeHeight / 2.0));
+                                clipPoints.Add(new Point3d(inflatedVertices[1].X, inflatedVertices[1].Y, clipVolumeHeight / 2.0));
+                                clipPoints.Add(new Point3d(inflatedVertices[2].X, inflatedVertices[2].Y, clipVolumeHeight / 2.0));
+                                clipPoints.Add(new Point3d(inflatedVertices[3].X, inflatedVertices[3].Y, clipVolumeHeight / 2.0));
+                                // Add first point again to close the top polygon
+                                clipPoints.Add(new Point3d(inflatedVertices[0].X, inflatedVertices[0].Y, clipVolumeHeight / 2.0));
 
-                                Type pointCloudCropType = Type.GetType("MAEDA.PointCloudCrop");
+
+                                // Attempt to use reflection to create and apply PointCloudCrop
+                                Type pointCloudCropType = Type.GetType("Autodesk.AutoCAD.DatabaseServices.PointCloudCrop, AcDbPointCloudObj"); // Common assembly name
+                                if (pointCloudCropType == null)
+                                {
+                                    // Try another common assembly name or provide specific path if known
+                                    pointCloudCropType = Type.GetType("Autodesk.AutoCAD.DatabaseServices.PointCloudCrop, AcMPolygonObj");
+                                }
+                                if (pointCloudCropType == null)
+                                {
+                                    // If your PointCloud object is from a specific plugin, its assembly/namespace might differ
+                                    // Example if it's MAEDA.PointCloudCrop:
+                                    // pointCloudCropType = Type.GetType("MAEDA.PointCloudCrop");
+                                }
+
                                 if (pointCloudCropType != null)
                                 {
-                                    dynamic newCrop = Activator.CreateInstance(pointCloudCropType, new object[] { IntPtr.Zero });
+                                    dynamic newCrop = Activator.CreateInstance(pointCloudCropType, new object[] { IntPtr.Zero }); // Pass IntPtr.Zero for internal handle
                                     if (newCrop != null)
                                     {
                                         newCrop.Vertices = clipPoints;
-                                        // Use explicit constructor for WorldXY plane
-                                        newCrop.CropPlane = new Plane(Point3d.Origin, Vector3d.XAxis, Vector3d.YAxis);
-                                        newCrop.CropType = (dynamic)Enum.Parse(pointCloudCropType.Assembly.GetType("MAEDA.PointCloudCropType"), "Polygonal");
-                                        newCrop.Inside = true;
-                                        newCrop.Inverted = false;
+                                        newCrop.CropPlane = new Plane(Point3d.Origin, Vector3d.XAxis, Vector3d.YAxis); // Explicit World XY plane
 
-                                        targetPointCloud.clearCropping();
-                                        targetPointCloud.addCroppingBoundary(newCrop);
-                                        targetPointCloud.ShowCropped = true;
+                                        // Use reflection to get the Enum value for CropType
+                                        Type pointCloudCropTypeEnum = pointCloudCropType.Assembly.GetType("Autodesk.AutoCAD.DatabaseServices.PointCloudCropType");
+                                        if (pointCloudCropTypeEnum != null)
+                                        {
+                                            newCrop.CropType = Enum.Parse(pointCloudCropTypeEnum, "Polygonal");
+                                        }
+                                        else
+                                        {
+                                            ed.WriteMessage("\nWarning: Could not find PointCloudCropType enum. Defaulting to Internal/External logic.");
+                                        }
 
-                                        ed.WriteMessage($"  - PointCloudExオブジェクトにクロップが適用されました。");
+                                        newCrop.Inside = true; // Crop inside the polygon
+                                        newCrop.Inverted = false; // Not inverted
+
+                                        targetPointCloud.clearCropping(); // Clear existing crops
+                                        targetPointCloud.addCroppingBoundary(newCrop); // Apply the new crop
+                                        targetPointCloud.ShowCropped = true; // Ensure cropped part is shown
+
+                                        ed.WriteMessage($"  - PointCloudオブジェクトにクロップが適用されました。");
                                     }
                                     else
                                     {
@@ -357,12 +414,12 @@ namespace MAEDA
                                 }
                                 else
                                 {
-                                    ed.WriteMessage("\nPointCloudCropクラスの定義が見つかりません。カスタムPoint Cloudライブラリを確認してください。");
+                                    ed.WriteMessage("\nPointCloudCropクラスの定義が見つかりません。AutoCAD SDKのバージョンとPointCloudオブジェクトのクロップAPIを確認してください。");
                                 }
                             }
                             catch (Autodesk.AutoCAD.Runtime.Exception ex)
                             {
-                                ed.WriteMessage($"\nエラー: PointCloudオブジェクトのクロップ適用中に問題が発生しました: {ex.Message}");
+                                ed.WriteMessage($"\nエラー: PointCloudオブジェクトのクロップ適用中にAutoCADランタイム問題が発生しました: {ex.Message}");
                                 ed.WriteMessage($"  AutoCAD SDKのバージョンとPointCloudオブジェクトのクロップAPIを確認してください。");
                             }
                             catch (System.Exception ex)
@@ -386,7 +443,7 @@ namespace MAEDA
                     ed.WriteMessage("\nクリック点を囲む有効な四角形セルが見つかりませんでした。");
                 }
 
-                tr.Commit();
+                tr.Commit(); // Commit the transaction to save changes and draw entities
             }
         }
 
@@ -396,14 +453,18 @@ namespace MAEDA
         /// </summary>
         /// <param name="clickedPointLocal">ブロックローカル座標でのクリック点。</param>
         /// <param name="blockLines">ブロック定義内のすべての線分（ローカル座標）。</param>
+        /// <param name="ed">Editor instance for debugging messages.</param>
+        /// <param name="tr">Transaction instance for drawing debug entities.</param>
+        /// <param name="ms">ModelSpaceRecord for drawing debug entities.</param>
+        /// <param name="targetBlockRef">The target BlockReference for global coordinate transformation.</param>
         /// <returns>クリック点を囲む有効な四角形セルを形成する4つの頂点のリスト。見つからない場合は空のリスト。</returns>
-        private List<Point3d> FindSurroundingCellPointssForRotatedGrid(Point3d clickedPointLocal, List<Line> blockLines)
+        private List<Point3d> FindSurroundingCellPointssForRotatedGrid(
+            Point3d clickedPointLocal, List<Line> blockLines, Editor ed, Transaction tr, BlockTableRecord ms, BlockReference targetBlockRef)
         {
-            Editor ed = Application.DocumentManager.MdiActiveDocument.Editor; // Get editor instance
+            // --- Adjusted maxDistance based on image analysis ---
+            double maxDistance = 50000.0; // Increased to capture large grid cells
 
-            double maxDistance = 30000.0;
-
-            // 1. Check candidateLines filtering
+            // Filter candidate lines in 2D that are reasonably close to the clicked point
             List<Line> candidateLines = blockLines
                 .Where(l => l.GetClosestPointTo(clickedPointLocal, false).DistanceTo(clickedPointLocal) < maxDistance)
                 .ToList();
@@ -416,10 +477,11 @@ namespace MAEDA
                 return new List<Point3d>();
             }
 
-            double intersectionTolerance = 0.01;
+            // Use the consistent geometricTolerance for intersection comparisons
+            double intersectionTolerance = geometricTolerance; // Keep consistent with main tolerance
             HashSet<Point3d> allIntersectionPoints = new HashSet<Point3d>(new Point3dComparer(intersectionTolerance));
 
-            // 2. Check intersection points
+            // Find all intersections between candidate lines
             for (int i = 0; i < candidateLines.Count; i++)
             {
                 for (int j = i + 1; j < candidateLines.Count; j++)
@@ -429,14 +491,32 @@ namespace MAEDA
 
                     foreach (Point3d pt in intersections)
                     {
-                        allIntersectionPoints.Add(pt);
+                        allIntersectionPoints.Add(pt); // Add unique intersection points
                     }
                 }
             }
             ed.WriteMessage($"\nDEBUG: Found {allIntersectionPoints.Count} unique intersection points.");
 
+            // --- Visual Debugging: Draw all raw intersection points (magenta circles) ---
+            if (allIntersectionPoints.Count > 0)
+            {
+                ed.WriteMessage($"\nDEBUG: Drawing {allIntersectionPoints.Count} raw intersection points (magenta circles).");
+                ms.UpgradeOpen(); // Ensure model space is open for write
+                foreach (Point3d pt in allIntersectionPoints)
+                {
+                    Point3d globalPt = pt.TransformBy(targetBlockRef.BlockTransform);
+                    using (Circle c = new Circle(globalPt, Vector3d.ZAxis, 20.0)) // Adjust radius as needed
+                    {
+                        c.ColorIndex = 6; // Magenta
+                        ms.AppendEntity(c);
+                        tr.AddNewlyCreatedDBObject(c, true);
+                    }
+                }
+                ms.DowngradeOpen(); // Downgrade after drawing
+            }
 
-            // 3. Check closest four corners
+
+            // Find the 4 intersection points closest to the clicked point
             List<Point3d> closestFourCorners = allIntersectionPoints
                 .OrderBy(p => p.DistanceTo(clickedPointLocal))
                 .Take(4)
@@ -450,14 +530,47 @@ namespace MAEDA
                 return new List<Point3d>();
             }
 
-            double geometricTolerance = 20.0;
+            // --- Visual Debugging: Draw the 4 closest corners (green DBPoints) ---
+            ed.WriteMessage($"\nDEBUG: Drawing 4 closest corners (green DBPoints).");
+            ms.UpgradeOpen();
+            foreach (Point3d pt in closestFourCorners)
+            {
+                Point3d globalPt = pt.TransformBy(targetBlockRef.BlockTransform);
+                using (DBPoint dbPt = new DBPoint(globalPt))
+                {
+                    dbPt.ColorIndex = 3; // Green
+                    ms.AppendEntity(dbPt);
+                    tr.AddNewlyCreatedDBObject(dbPt, true);
+                }
+            }
+            ms.DowngradeOpen();
 
-            // 4. Check point sorting
+
+            // 4. Sort points to form a closed polygon (rectangle)
             List<Point3d> sortedCellCorners = SortPointsForPolyline(closestFourCorners);
             ed.WriteMessage($"\nDEBUG: Sorted cell corners: {string.Join(", ", sortedCellCorners.Select(p => $"({p.X:F1},{p.Y:F1})"))}");
 
+            // --- Visual Debugging: Draw the temporary sorted polyline (yellow) ---
+            if (sortedCellCorners.Count == 4)
+            {
+                ed.WriteMessage($"\nDEBUG: Drawing temporary sorted polyline (yellow).");
+                ms.UpgradeOpen();
+                Polyline tempSortedPoly = new Polyline();
+                tempSortedPoly.ColorIndex = 2; // Yellow
+                foreach (Point3d pt in sortedCellCorners)
+                {
+                    Point3d globalPt = pt.TransformBy(targetBlockRef.BlockTransform);
+                    tempSortedPoly.AddVertexAt(tempSortedPoly.NumberOfVertices, new Point2d(globalPt.X, globalPt.Y), 0, 0, 0);
+                }
+                tempSortedPoly.Closed = true;
+                ms.AppendEntity(tempSortedPoly);
+                tr.AddNewlyCreatedDBObject(tempSortedPoly, true);
+                ms.DowngradeOpen();
+            }
 
-            // 5. Check segment validation
+
+            // 5. Verify that the sorted points are indeed connected by actual lines from blockLines
+            // This is crucial for ensuring the detected corners truly form a cell defined by existing lines.
             List<Line> foundCellLines = new List<Line>();
             bool allSegmentsFound = true;
             Plane worldXYPlane = new Plane(Point3d.Origin, Vector3d.XAxis, Vector3d.YAxis);
@@ -472,9 +585,9 @@ namespace MAEDA
 
                 ed.WriteMessage($"\nDEBUG: Checking segment from ({startPt2d.X:F1},{startPt2d.Y:F1}) to ({endPt2d.X:F1},{endPt2d.Y:F1}).");
 
-                if (GetDistance(startPt2d, endPt2d) < geometricTolerance)
+                if (GetDistance(startPt2d, endPt2d) < geometricTolerance) // Use geometricTolerance here
                 {
-                    ed.WriteMessage($"\nDEBUG: Degenerate segment detected (distance < {geometricTolerance}).");
+                    ed.WriteMessage($"\nDEBUG: Degenerate segment detected (distance < {geometricTolerance}). Setting allSegmentsFound to false.");
                     allSegmentsFound = false;
                     break;
                 }
@@ -490,19 +603,21 @@ namespace MAEDA
                     Point2d blockLineEnd2d = blockLine.EndPoint.Convert2d(worldXYPlane);
                     LineEquation2D blockLineEq = new LineEquation2D(blockLineStart2d, blockLineEnd2d);
 
+                    // Check if the segment is collinear with the blockLine
                     if (segmentEquation.IsCoincident(blockLineEq, geometricTolerance))
                     {
                         ed.WriteMessage($"\nDEBUG:   - Segment coincident with blockLine from ({blockLineStart2d.X:F1},{blockLineStart2d.Y:F1}) to ({blockLineEnd2d.X:F1},{blockLineEnd2d.Y:F1}).");
+                        // Check if the segment's endpoints lie on the blockLine segment (within tolerance)
                         if (IsPointOnSegment2D(startPt2d, blockLineStart2d, blockLineEnd2d, geometricTolerance) &&
                             IsPointOnSegment2D(endPt2d, blockLineStart2d, blockLineEnd2d, geometricTolerance))
                         {
                             ed.WriteMessage($"\nDEBUG:     - Both segment points found ON blockLine segment. Match found!");
                             matchingBlockLine = blockLine;
-                            break;
+                            break; // Found matching line for this segment, move to next segment
                         }
                         else
                         {
-                            ed.WriteMessage($"\nDEBUG:     - Segment points NOT both found on blockLine segment extent.");
+                            ed.WriteMessage($"\nDEBUG:     - Segment points NOT both found on blockLine segment extent. (Endpoints not on blockLine segment)");
                         }
                     }
                 }
@@ -523,18 +638,22 @@ namespace MAEDA
             }
 
             // 6. Optional rectangle validation (if enabled)
+            // Uncomment and use these if you want to strictly enforce parallelogram/rectangle properties
+            // The existing debug output should tell you if these conditions are met anyway.
             Vector2d v1_2d = new Vector2d(sortedCellCorners[1].X - sortedCellCorners[0].X, sortedCellCorners[1].Y - sortedCellCorners[0].Y);
             Vector2d v2_2d = new Vector2d(sortedCellCorners[2].X - sortedCellCorners[1].X, sortedCellCorners[2].Y - sortedCellCorners[1].Y);
             Vector2d v3_2d = new Vector2d(sortedCellCorners[3].X - sortedCellCorners[2].X, sortedCellCorners[3].Y - sortedCellCorners[2].Y);
             Vector2d v4_2d = new Vector2d(sortedCellCorners[0].X - sortedCellCorners[3].X, sortedCellCorners[0].Y - sortedCellCorners[3].Y);
 
             bool isParallelogram = IsEqualTo(v1_2d.Length, v3_2d.Length, geometricTolerance) && IsEqualTo(v2_2d.Length, v4_2d.Length, geometricTolerance);
-            bool isRectangle = IsZero(v1_2d.DotProduct(v2_2d), geometricTolerance * v1_2d.Length * v2_2d.Length);
+            bool isRectangle = IsZero(v1_2d.DotProduct(v2_2d), geometricTolerance * v1_2d.Length * v2_2d.Length); // Scale tolerance by lengths
 
             ed.WriteMessage($"\nDEBUG: Shape validation - IsParallelogram: {isParallelogram}, IsRectangle: {isRectangle}.");
 
-            // If you had commented out the "return new List<Point3d>()" lines here, these checks might not cause a failure,
-            // but it's good to know their status.
+            // If you want to enforce these conditions, uncomment the returns:
+            // if (!isParallelogram) { ed.WriteMessage("\nDEBUG: Not a parallelogram."); return new List<Point3d>(); }
+            // if (!isRectangle) { ed.WriteMessage("\nDEBUG: Not a rectangle (non-perpendicular corners)."); return new List<Point3d>(); }
+
 
             // 7. Check clicked point inside cell
             List<Point2d> polygonVertices2d = sortedCellCorners.Select(p => new Point2d(p.X, p.Y)).ToList();
@@ -549,23 +668,28 @@ namespace MAEDA
             ed.WriteMessage("\nDEBUG: All checks passed. Returning sorted cell corners.");
             return sortedCellCorners;
         }
+
+        // Sorts points to form a consistent polyline (e.g., clockwise or counter-clockwise)
         private List<Point3d> SortPointsForPolyline(List<Point3d> points)
         {
             if (points.Count != 4) return points;
 
+            // Calculate centroid in 2D
             Point2d centroid2d = Point2d.Origin;
             foreach (Point3d p in points)
             {
                 centroid2d = centroid2d + (new Point2d(p.X, p.Y).GetAsVector() / points.Count);
             }
 
+            // Sort by angle around the centroid
             return points.OrderBy(p =>
             {
                 Vector2d vec2d = new Point2d(p.X, p.Y) - centroid2d;
-                return Math.Atan2(vec2d.Y, vec2d.X);
+                return Math.Atan2(vec2d.Y, vec2d.X); // Angle from positive X-axis
             }).ToList();
         }
 
+        // Inflates a 2D rectangle defined by 4 Point3d vertices
         private List<Point3d> InflateRectangle(List<Point3d> originalVertices, double percentage)
         {
             if (originalVertices == null || originalVertices.Count != 4)
@@ -573,6 +697,7 @@ namespace MAEDA
                 return new List<Point3d>();
             }
 
+            // Calculate centroid in 2D for inflation
             Point2d centroid2d = Point2d.Origin;
             foreach (Point3d p in originalVertices)
             {
@@ -585,8 +710,10 @@ namespace MAEDA
                 Point2d p2d = new Point2d(p.X, p.Y);
                 Vector2d vecFromCentroid2d = p2d - centroid2d;
 
+                // Scale the vector from centroid to inflate the point
                 Vector2d inflatedVec2d = vecFromCentroid2d * (1.0 + percentage);
 
+                // Create the new 3D point, keeping original Z
                 Point3d newP = new Point3d(centroid2d.X + inflatedVec2d.X, centroid2d.Y + inflatedVec2d.Y, p.Z);
                 inflatedVertices.Add(newP);
             }
@@ -594,6 +721,8 @@ namespace MAEDA
             return inflatedVertices;
         }
 
+        // Custom comparer for Point3d to use with HashSet (for unique intersection points)
+        // Uses geometricTolerance for comparison
         private class Point3dComparer : IEqualityComparer<Point3d>
         {
             private readonly double _toleranceValue;
@@ -605,15 +734,19 @@ namespace MAEDA
 
             public bool Equals(Point3d p1, Point3d p2)
             {
-                // This uses the standard AutoCAD Geometry extension method.
-                // If this still gives an error, your Acad.Geometry.dll reference might be old
-                // or you might need a custom manual comparison for Point3d as well.
-                return p1.IsEqualTo(p2, new Tolerance(_toleranceValue, _toleranceValue));
+                // Use custom IsEqualTo for each coordinate, or Point3d.IsEqualTo if reliable
+                return CommandCropByClick.IsEqualTo(p1.X, p2.X, _toleranceValue) &&
+                       CommandCropByClick.IsEqualTo(p1.Y, p2.Y, _toleranceValue) &&
+                       CommandCropByClick.IsEqualTo(p1.Z, p2.Z, _toleranceValue);
+                // Note: Autodesk.AutoCAD.Geometry.Point3d.IsEqualTo(Point3d, Tolerance) is also an option
+                // but sometimes direct comparison provides more control if it's failing.
+                // return p1.IsEqualTo(p2, new Tolerance(_toleranceValue, _toleranceValue));
             }
 
             public int GetHashCode(Point3d p)
             {
-                // It's correct to call GetHashCode on the double result of Math.Round.
+                // A simple hash code based on rounding to tolerance steps
+                // This ensures points that are "equal" within tolerance have the same hash code.
                 int xHash = Math.Round(p.X / _toleranceValue).GetHashCode();
                 int yHash = Math.Round(p.Y / _toleranceValue).GetHashCode();
                 int zHash = Math.Round(p.Z / _toleranceValue).GetHashCode();

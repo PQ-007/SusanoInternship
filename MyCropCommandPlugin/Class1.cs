@@ -75,12 +75,12 @@ namespace MAEDA
     public class CommandCropByClick
     {
         // Define a small tolerance for internal checks like division by zero in normalization
-        // This is for very small numerical checks, not for geometric comparisons.
         public const double SmallTolerance = 1e-9;
 
-        // --- IMPORTANT: Adjust this tolerance for your drawing's precision ---
-        // For large coordinates, this needs to be larger than 0.1
-        private const double geometricTolerance = 10.0; // Increased tolerance
+        // --- IMPORTANT: Adjust these tolerances for your drawing's precision ---
+        private const double geometricTolerance = 10.0; // Increased tolerance for general comparisons
+        private const double angularTolerance = 0.005; // ~0.28 degrees, for angle comparisons (radians)
+
 
         // Helper methods for double comparisons with tolerance (made public static)
         public static bool IsEqualTo(double d1, double d2, double tolerance)
@@ -98,6 +98,46 @@ namespace MAEDA
         {
             return Math.Sqrt(Math.Pow(p2.X - p1.X, 2) + Math.Pow(p2.Y - p1.Y, 2));
         }
+
+        /// <summary>
+        /// Projects a 2D point onto a 2D vector, returning the scalar projection.
+        /// Useful for determining relative positions along an axis.
+        /// </summary>
+        /// <param name="point">The point to project (relative to origin).</param>
+        /// <param name="vector">The vector to project onto (unit vector preferred).</param>
+        /// <returns>Scalar projection value.</returns>
+        public static double ProjectPointOntoVector(Point2d point, Vector2d vector)
+        {
+            return point.X * vector.X + point.Y * vector.Y;
+        }
+
+        /// <summary>
+        /// Compares two angles (in radians) for parallelism within a given tolerance.
+        /// Handles 0/PI normalization.
+        /// </summary>
+        public static bool AreAnglesParallel(double angle1, double angle2, double tolerance)
+        {
+            double diff = Math.Abs(angle1 - angle2);
+            // Normalize difference to be between 0 and PI
+            diff = diff % Math.PI;
+            if (diff > Math.PI / 2.0) diff = Math.PI - diff; // Handle angles like 170 vs 10 degrees (which are parallel)
+            return diff < tolerance;
+        }
+
+        /// <summary>
+        /// Compares two angles (in radians) for perpendicularity within a given tolerance.
+        /// Handles 0/PI normalization.
+        /// </summary>
+        public static bool AreAnglesPerpendicular(double angle1, double angle2, double tolerance)
+        {
+            double diff = Math.Abs(angle1 - angle2);
+            // Normalize difference to be between 0 and PI
+            diff = diff % Math.PI;
+            if (diff > Math.PI / 2.0) diff = Math.PI - diff;
+
+            return IsZero(diff - Math.PI / 2.0, tolerance); // Check if difference is exactly 90 degrees (PI/2)
+        }
+
 
         /// <summary>
         /// Custom implementation for Point-in-Polygon check.
@@ -250,15 +290,22 @@ namespace MAEDA
                 List<Line> blockLines = new List<Line>();
                 BlockTableRecord btr = (BlockTableRecord)tr.GetObject(targetBlockRef.BlockTableRecord, OpenMode.ForRead);
 
-                // Collect all Line entities within the block definition
+                // --- START PASTE HERE ---
+                // Filter by Color Index 5 (Blue) and FLATTEN Lines
                 foreach (ObjectId entityId in btr)
                 {
                     Entity ent = (Entity)tr.GetObject(entityId, OpenMode.ForRead);
-                    if (ent is Line line)
+                    if (ent is Line line ) // Only process blue lines (Color Index 5)
                     {
-                        blockLines.Add(line);
+                        // IMPORTANT: FLATTEN THE LINE TO Z=0 TO ENSURE 2D INTERSECTIONS
+                        // Clone to avoid modifying the original block definition in memory prematurely
+                        ed.WriteMessage("blue2");
+                        Line flatLine = (Line)line.Clone();
+                        
+                        blockLines.Add(flatLine);
                     }
                 }
+                // --- END PASTE HERE ---
 
                 if (blockLines.Count == 0)
                 {
@@ -266,7 +313,7 @@ namespace MAEDA
                     return;
                 }
 
-                // --- Core Logic: Find the surrounding cell ---
+                // --- Core Logic: Find the surrounding cell using optimized strategy ---
                 List<Point3d> originalVertices = FindSurroundingCellPointssForRotatedGrid(
                     clickedPointLocal, blockLines, ed, tr, ms, targetBlockRef); // Pass required objects
 
@@ -375,7 +422,6 @@ namespace MAEDA
                                 if (pointCloudCropType == null)
                                 {
                                     // If your PointCloud object is from a specific plugin, its assembly/namespace might differ
-                                    // Example if it's MAEDA.PointCloudCrop:
                                     // pointCloudCropType = Type.GetType("MAEDA.PointCloudCrop");
                                 }
 
@@ -448,20 +494,18 @@ namespace MAEDA
         }
 
         /// <summary>
-        /// クリックされた点を囲む斜めの格子状の線分（四角形）を検索し、
-        /// それが実際のグリッドセルであり、クリック点がその中に含まれるかを検証します。
+        /// Finds the surrounding cell for a clicked point in a rotated grid using an optimized strategy.
         /// </summary>
-        /// <param name="clickedPointLocal">ブロックローカル座標でのクリック点。</param>
-        /// <param name="blockLines">ブロック定義内のすべての線分（ローカル座標）。</param>
+        /// <param name="clickedPointLocal">Clicked point in block local coordinates.</param>
+        /// <param name="blockLines">All line entities within the block definition.</param>
         /// <param name="ed">Editor instance for debugging messages.</param>
         /// <param name="tr">Transaction instance for drawing debug entities.</param>
         /// <param name="ms">ModelSpaceRecord for drawing debug entities.</param>
         /// <param name="targetBlockRef">The target BlockReference for global coordinate transformation.</param>
-        /// <returns>クリック点を囲む有効な四角形セルを形成する4つの頂点のリスト。見つからない場合は空のリスト。</returns>
+        /// <returns>List of 4 Point3d vertices forming the cell, or empty list if not found.</returns>
         private List<Point3d> FindSurroundingCellPointssForRotatedGrid(
             Point3d clickedPointLocal, List<Line> blockLines, Editor ed, Transaction tr, BlockTableRecord ms, BlockReference targetBlockRef)
         {
-            // --- Adjusted maxDistance based on image analysis ---
             double maxDistance = 50000.0; // Increased to capture large grid cells
 
             // Filter candidate lines in 2D that are reasonably close to the clicked point
@@ -469,19 +513,20 @@ namespace MAEDA
                 .Where(l => l.GetClosestPointTo(clickedPointLocal, false).DistanceTo(clickedPointLocal) < maxDistance)
                 .ToList();
 
-            ed.WriteMessage($"\nDEBUG: Found {candidateLines.Count} candidate lines within {maxDistance} of clickedPointLocal.");
+            ed.WriteMessage($"\nDEBUG: Found {candidateLines.Count} candidate lines within {maxDistance:F1} of clickedPointLocal.");
 
-            if (candidateLines.Count < 2)
+            if (candidateLines.Count < 4) // Need at least 4 lines to form a rectangle
             {
-                ed.WriteMessage("\nDEBUG: Not enough candidate lines (less than 2). Returning empty list.");
+                ed.WriteMessage("\nDEBUG: Not enough candidate lines (less than 4). Returning empty list.");
                 return new List<Point3d>();
             }
 
-            // Use the consistent geometricTolerance for intersection comparisons
-            double intersectionTolerance = geometricTolerance; // Keep consistent with main tolerance
-            HashSet<Point3d> allIntersectionPoints = new HashSet<Point3d>(new Point3dComparer(intersectionTolerance));
+            // --- NEW DEBUGGING FOR INTERSECTIONS ---
+            List<Point3d> rawIntersectionsForDebug = new List<Point3d>();
+            ms.UpgradeOpen(); // Ensure model space is open for write
 
-            // Find all intersections between candidate lines
+            ed.WriteMessage($"\nDEBUG: Calculating ALL raw intersections for debugging (magenta circles).");
+            int intersectionCount = 0;
             for (int i = 0; i < candidateLines.Count; i++)
             {
                 for (int j = i + 1; j < candidateLines.Count; j++)
@@ -491,63 +536,253 @@ namespace MAEDA
 
                     foreach (Point3d pt in intersections)
                     {
-                        allIntersectionPoints.Add(pt); // Add unique intersection points
+                        rawIntersectionsForDebug.Add(pt);
+                        intersectionCount++;
+
+                        // Visual Debugging: Draw each raw intersection (magenta circle)
+                        Point3d globalPt = pt.TransformBy(targetBlockRef.BlockTransform);
+                        using (Circle c = new Circle(globalPt, Vector3d.ZAxis, 20.0)) // Adjust radius as needed
+                        {
+                            c.ColorIndex = 6; // Magenta
+                            ms.AppendEntity(c);
+                            tr.AddNewlyCreatedDBObject(c, true);
+                        }
+
+                        // Debugging: Draw lines from intersection point to closest point on each line
+                        // Helps to see if the intersection is truly 'on' the lines
+                        Point3d closestOnLineI = candidateLines[i].GetClosestPointTo(pt, false);
+                        Point3d closestOnLineJ = candidateLines[j].GetClosestPointTo(pt, false);
+
+                        using (Line debugLineI = new Line(pt.TransformBy(targetBlockRef.BlockTransform), closestOnLineI.TransformBy(targetBlockRef.BlockTransform)))
+                        using (Line debugLineJ = new Line(pt.TransformBy(targetBlockRef.BlockTransform), closestOnLineJ.TransformBy(targetBlockRef.BlockTransform)))
+                        {
+                            debugLineI.ColorIndex = 4; // Cyan
+                            debugLineJ.ColorIndex = 4; // Cyan
+                            ms.AppendEntity(debugLineI);
+                            ms.AppendEntity(debugLineJ);
+                            tr.AddNewlyCreatedDBObject(debugLineI, true);
+                            tr.AddNewlyCreatedDBObject(debugLineJ, true);
+                        }
                     }
                 }
             }
-            ed.WriteMessage($"\nDEBUG: Found {allIntersectionPoints.Count} unique intersection points.");
+            ms.DowngradeOpen(); // Downgrade after drawing debug entities
+            ed.WriteMessage($"\nDEBUG: Total raw intersections found and drawn (magenta circles): {intersectionCount}");
+            // END NEW DEBUGGING FOR INTERSECTIONS
 
-            // --- Visual Debugging: Draw all raw intersection points (magenta circles) ---
-            if (allIntersectionPoints.Count > 0)
+            // --- Optimized Step 1: Group lines by orientation/angle ---
+            // Key is a normalized angle (0 to PI), Value is list of lines in that orientation
+            Dictionary<double, List<Line>> linesByAngle = new Dictionary<double, List<Line>>();
+
+            foreach (Line line in candidateLines)
             {
-                ed.WriteMessage($"\nDEBUG: Drawing {allIntersectionPoints.Count} raw intersection points (magenta circles).");
-                ms.UpgradeOpen(); // Ensure model space is open for write
-                foreach (Point3d pt in allIntersectionPoints)
+                Vector3d delta = line.Delta;
+                double angle = Math.Atan2(delta.Y, delta.X);
+                double normalizedAngle = angle % Math.PI;
+                if (normalizedAngle < 0) normalizedAngle += Math.PI;
+
+                bool addedToGroup = false;
+                foreach (double existingAngleKey in linesByAngle.Keys)
                 {
-                    Point3d globalPt = pt.TransformBy(targetBlockRef.BlockTransform);
-                    using (Circle c = new Circle(globalPt, Vector3d.ZAxis, 20.0)) // Adjust radius as needed
+                    if (AreAnglesParallel(normalizedAngle, existingAngleKey, angularTolerance))
                     {
-                        c.ColorIndex = 6; // Magenta
-                        ms.AppendEntity(c);
-                        tr.AddNewlyCreatedDBObject(c, true);
+                        linesByAngle[existingAngleKey].Add(line);
+                        addedToGroup = true;
+                        break;
                     }
                 }
-                ms.DowngradeOpen(); // Downgrade after drawing
+                if (!addedToGroup)
+                {
+                    linesByAngle.Add(normalizedAngle, new List<Line> { line });
+                }
             }
+            ed.WriteMessage($"\nDEBUG: Grouped candidate lines into {linesByAngle.Count} orientation bundles.");
 
+            var significantBundles = linesByAngle.Where(kvp => kvp.Value.Count >= 2).ToList();
 
-            // Find the 4 intersection points closest to the clicked point
-            List<Point3d> closestFourCorners = allIntersectionPoints
-                .OrderBy(p => p.DistanceTo(clickedPointLocal))
-                .Take(4)
-                .ToList();
-
-            ed.WriteMessage($"\nDEBUG: After filtering, closestFourCorners count: {closestFourCorners.Count}.");
-
-            if (closestFourCorners.Count != 4)
+            if (significantBundles.Count < 2)
             {
-                ed.WriteMessage("\nDEBUG: Did not find exactly 4 closest intersection points. Returning empty list.");
+                ed.WriteMessage("\nDEBUG: Not enough significant line bundles (less than 2 groups of parallel lines). Returning empty list.");
                 return new List<Point3d>();
             }
 
-            // --- Visual Debugging: Draw the 4 closest corners (green DBPoints) ---
-            ed.WriteMessage($"\nDEBUG: Drawing 4 closest corners (green DBPoints).");
-            ms.UpgradeOpen();
-            foreach (Point3d pt in closestFourCorners)
+            // --- Optimized Step 2: Identify Perpendicular Bundles ---
+            List<Line> bundle1Lines = null;
+            List<Line> bundle2Lines = null;
+            Vector2d bundle1Direction = new Vector2d(0, 0);
+            Vector2d bundle2Direction = new Vector2d(0, 0);
+
+            for (int i = 0; i < significantBundles.Count; i++)
             {
-                Point3d globalPt = pt.TransformBy(targetBlockRef.BlockTransform);
-                using (DBPoint dbPt = new DBPoint(globalPt))
+                for (int j = i + 1; j < significantBundles.Count; j++)
                 {
-                    dbPt.ColorIndex = 3; // Green
-                    ms.AppendEntity(dbPt);
-                    tr.AddNewlyCreatedDBObject(dbPt, true);
+                    double angle1 = significantBundles[i].Key;
+                    double angle2 = significantBundles[j].Key;
+
+                    if (AreAnglesPerpendicular(angle1, angle2, angularTolerance))
+                    {
+                        bundle1Lines = significantBundles[i].Value;
+                        bundle2Lines = significantBundles[j].Value;
+                        bundle1Direction = new Vector2d(Math.Cos(angle1), Math.Sin(angle1)).GetNormal();
+                        bundle2Direction = new Vector2d(Math.Cos(angle2), Math.Sin(angle2)).GetNormal();
+                        break;
+                    }
+                }
+                if (bundle1Lines != null) break;
+            }
+
+            if (bundle1Lines == null || bundle2Lines == null)
+            {
+                ed.WriteMessage("\nDEBUG: No two perpendicular line bundles found. Returning empty list.");
+                return new List<Point3d>();
+            }
+
+            ed.WriteMessage($"\nDEBUG: Identified two perpendicular bundles with {bundle1Lines.Count} and {bundle2Lines.Count} lines.");
+
+
+            // --- Optimized Step 3: Find the Bounding Lines for the Clicked Point ---
+            Line lineH1 = null, lineH2 = null;
+            Line lineV1 = null, lineV2 = null;
+
+            // Project clicked point onto a vector perpendicular to bundle1 lines
+            Vector2d projVector1 = new Vector2d(-bundle1Direction.Y, bundle1Direction.X).GetNormal();
+            double clickedPointProj1 = ProjectPointOntoVector(new Point2d(clickedPointLocal.X, clickedPointLocal.Y), projVector1);
+
+            // Sort lines in bundle 1 by their projection onto projVector1
+            var sortedBundle1Lines = bundle1Lines
+                .Select(l => new { Line = l, Projection = ProjectPointOntoVector(new Point2d(l.StartPoint.X, l.StartPoint.Y), projVector1) })
+                .OrderBy(item => item.Projection)
+                .ToList();
+
+            for (int i = 0; i < sortedBundle1Lines.Count - 1; i++)
+            {
+                double p1 = sortedBundle1Lines[i].Projection;
+                double p2 = sortedBundle1Lines[i + 1].Projection;
+
+                // Check if clickedPointProj1 is between p1 and p2 (with geometricTolerance for boundaries)
+                if ((clickedPointProj1 >= p1 - geometricTolerance && clickedPointProj1 <= p2 + geometricTolerance) ||
+                    (clickedPointProj1 <= p1 + geometricTolerance && clickedPointProj1 >= p2 - geometricTolerance))
+                {
+                    lineH1 = sortedBundle1Lines[i].Line;
+                    lineH2 = sortedBundle1Lines[i + 1].Line;
+                    break;
                 }
             }
-            ms.DowngradeOpen();
+            // Fallback for lineH1, lineH2: If not bracketed, find the two closest lines to the clicked point's projection.
+            if (lineH1 == null && sortedBundle1Lines.Count >= 2)
+            {
+                var closestTwo = sortedBundle1Lines
+                                   .OrderBy(item => Math.Abs(item.Projection - clickedPointProj1))
+                                   .Take(2)
+                                   .OrderBy(item => item.Projection) // Ensure they are ordered for H1, H2
+                                   .ToList();
+                if (closestTwo.Count == 2)
+                {
+                    lineH1 = closestTwo[0].Line;
+                    lineH2 = closestTwo[1].Line;
+                }
+            }
 
 
-            // 4. Sort points to form a closed polygon (rectangle)
-            List<Point3d> sortedCellCorners = SortPointsForPolyline(closestFourCorners);
+            // Project clicked point onto a vector perpendicular to bundle2 lines
+            Vector2d projVector2 = new Vector2d(-bundle2Direction.Y, bundle2Direction.X).GetNormal();
+            double clickedPointProj2 = ProjectPointOntoVector(new Point2d(clickedPointLocal.X, clickedPointLocal.Y), projVector2);
+
+            // Sort lines in bundle 2 by their projection onto projVector2
+            var sortedBundle2Lines = bundle2Lines
+                .Select(l => new { Line = l, Projection = ProjectPointOntoVector(new Point2d(l.StartPoint.X, l.StartPoint.Y), projVector2) })
+                .OrderBy(item => item.Projection)
+                .ToList();
+
+            for (int i = 0; i < sortedBundle2Lines.Count - 1; i++)
+            {
+                double p1 = sortedBundle2Lines[i].Projection;
+                double p2 = sortedBundle2Lines[i + 1].Projection;
+                if ((clickedPointProj2 >= p1 - geometricTolerance && clickedPointProj2 <= p2 + geometricTolerance) ||
+                    (clickedPointProj2 <= p1 + geometricTolerance && clickedPointProj2 >= p2 - geometricTolerance))
+                {
+                    lineV1 = sortedBundle2Lines[i].Line;
+                    lineV2 = sortedBundle2Lines[i + 1].Line;
+                    break;
+                }
+            }
+            // Fallback for lineV1, lineV2
+            if (lineV1 == null && sortedBundle2Lines.Count >= 2)
+            {
+                var closestTwo = sortedBundle2Lines
+                                   .OrderBy(item => Math.Abs(item.Projection - clickedPointProj2))
+                                   .Take(2)
+                                   .OrderBy(item => item.Projection)
+                                   .ToList();
+                if (closestTwo.Count == 2)
+                {
+                    lineV1 = closestTwo[0].Line;
+                    lineV2 = closestTwo[1].Line;
+                }
+            }
+
+
+            if (lineH1 == null || lineH2 == null || lineV1 == null || lineV2 == null)
+            {
+                ed.WriteMessage($"\nDEBUG: Failed to find two bracketing lines from each perpendicular bundle. This might mean the click is outside a clear cell or there aren't enough lines.");
+                ed.WriteMessage($"  LineH1: {(lineH1 != null ? "Found" : "Not Found")}, LineH2: {(lineH2 != null ? "Found" : "Not Found")}");
+                ed.WriteMessage($"  LineV1: {(lineV1 != null ? "Found" : "Not Found")}, LineV2: {(lineV2 != null ? "Found" : "Not Found")}");
+                return new List<Point3d>();
+            }
+
+            List<Line> fourCellLines = new List<Line> { lineH1, lineH2, lineV1, lineV2 };
+            ed.WriteMessage($"\nDEBUG: Successfully identified 4 bracketing lines for the cell.");
+
+            // --- Optimized Step 4: Calculate Intersection Points of the Four Bounding Lines ---
+            // Use the custom Point3dComparer with geometricTolerance to ensure uniqueness
+            HashSet<Point3d> cellCornersSet = new HashSet<Point3d>(new Point3dComparer(geometricTolerance));
+
+            // Explicitly intersect the 4 lines to get the 4 corners of the potential cell
+            Point3dCollection intersections1 = new Point3dCollection();
+            lineH1.IntersectWith(lineV1, Intersect.OnBothOperands, intersections1, IntPtr.Zero, IntPtr.Zero);
+            foreach (Point3d pt in intersections1) cellCornersSet.Add(pt);
+
+            Point3dCollection intersections2 = new Point3dCollection();
+            lineH1.IntersectWith(lineV2, Intersect.OnBothOperands, intersections2, IntPtr.Zero, IntPtr.Zero);
+            foreach (Point3d pt in intersections2) cellCornersSet.Add(pt);
+
+            Point3dCollection intersections3 = new Point3dCollection();
+            lineH2.IntersectWith(lineV1, Intersect.OnBothOperands, intersections3, IntPtr.Zero, IntPtr.Zero);
+            foreach (Point3d pt in intersections3) cellCornersSet.Add(pt);
+
+            Point3dCollection intersections4 = new Point3dCollection();
+            lineH2.IntersectWith(lineV2, Intersect.OnBothOperands, intersections4, IntPtr.Zero, IntPtr.Zero);
+            foreach (Point3d pt in intersections4) cellCornersSet.Add(pt);
+
+            List<Point3d> finalCellCorners = cellCornersSet.ToList();
+            ed.WriteMessage($"\nDEBUG: Found {finalCellCorners.Count} unique intersection points from the 4 bracketing lines.");
+
+            // --- Visual Debugging: Draw the 4 identified corner points (green DBPoints) ---
+            if (finalCellCorners.Count == 4)
+            {
+                ed.WriteMessage($"\nDEBUG: Drawing 4 identified cell corners (green DBPoints).");
+                ms.UpgradeOpen();
+                foreach (Point3d pt in finalCellCorners)
+                {
+                    Point3d globalPt = pt.TransformBy(targetBlockRef.BlockTransform);
+                    using (DBPoint dbPt = new DBPoint(globalPt))
+                    {
+                        dbPt.ColorIndex = 3; // Green
+                        ms.AppendEntity(dbPt);
+                        tr.AddNewlyCreatedDBObject(dbPt, true);
+                    }
+                }
+                ms.DowngradeOpen();
+            }
+            else
+            {
+                ed.WriteMessage("\nDEBUG: Did not get exactly 4 intersection points from bracketing lines. Returning empty list.");
+                return new List<Point3d>();
+            }
+
+            // --- Continue with existing validation steps ---
+            // 5. Sort points to form a closed polygon (rectangle)
+            List<Point3d> sortedCellCorners = SortPointsForPolyline(finalCellCorners);
             ed.WriteMessage($"\nDEBUG: Sorted cell corners: {string.Join(", ", sortedCellCorners.Select(p => $"({p.X:F1},{p.Y:F1})"))}");
 
             // --- Visual Debugging: Draw the temporary sorted polyline (yellow) ---
@@ -560,7 +795,7 @@ namespace MAEDA
                 foreach (Point3d pt in sortedCellCorners)
                 {
                     Point3d globalPt = pt.TransformBy(targetBlockRef.BlockTransform);
-                    tempSortedPoly.AddVertexAt(tempSortedPoly.NumberOfVertices, new Point2d(globalPt.X, globalPt.Y), 0, 0, 0);
+                    tempSortedPoly.AddVertexAt(tempSortedPoly.NumberOfVertices, new Point2d(globalPt.X, pt.Y), 0, 0, 0);
                 }
                 tempSortedPoly.Closed = true;
                 ms.AppendEntity(tempSortedPoly);
@@ -569,9 +804,7 @@ namespace MAEDA
             }
 
 
-            // 5. Verify that the sorted points are indeed connected by actual lines from blockLines
-            // This is crucial for ensuring the detected corners truly form a cell defined by existing lines.
-            List<Line> foundCellLines = new List<Line>();
+            // 6. Verify that the sorted points are indeed connected by actual lines from blockLines
             bool allSegmentsFound = true;
             Plane worldXYPlane = new Plane(Point3d.Origin, Vector3d.XAxis, Vector3d.YAxis);
 
@@ -585,9 +818,9 @@ namespace MAEDA
 
                 ed.WriteMessage($"\nDEBUG: Checking segment from ({startPt2d.X:F1},{startPt2d.Y:F1}) to ({endPt2d.X:F1},{endPt2d.Y:F1}).");
 
-                if (GetDistance(startPt2d, endPt2d) < geometricTolerance) // Use geometricTolerance here
+                if (GetDistance(startPt2d, endPt2d) < geometricTolerance)
                 {
-                    ed.WriteMessage($"\nDEBUG: Degenerate segment detected (distance < {geometricTolerance}). Setting allSegmentsFound to false.");
+                    ed.WriteMessage($"\nDEBUG: Degenerate segment detected (distance < {geometricTolerance:F2}). Setting allSegmentsFound to false.");
                     allSegmentsFound = false;
                     break;
                 }
@@ -596,6 +829,8 @@ namespace MAEDA
                 Line matchingBlockLine = null;
                 int linesCheckedForSegment = 0;
 
+                // IMPORTANT: Check against the *original* blockLines list, not just the 4 selected lines,
+                // because the "matched" segment might be part of a longer line.
                 foreach (Line blockLine in blockLines)
                 {
                     linesCheckedForSegment++;
@@ -603,21 +838,13 @@ namespace MAEDA
                     Point2d blockLineEnd2d = blockLine.EndPoint.Convert2d(worldXYPlane);
                     LineEquation2D blockLineEq = new LineEquation2D(blockLineStart2d, blockLineEnd2d);
 
-                    // Check if the segment is collinear with the blockLine
                     if (segmentEquation.IsCoincident(blockLineEq, geometricTolerance))
                     {
-                        ed.WriteMessage($"\nDEBUG:   - Segment coincident with blockLine from ({blockLineStart2d.X:F1},{blockLineStart2d.Y:F1}) to ({blockLineEnd2d.X:F1},{blockLineEnd2d.Y:F1}).");
-                        // Check if the segment's endpoints lie on the blockLine segment (within tolerance)
                         if (IsPointOnSegment2D(startPt2d, blockLineStart2d, blockLineEnd2d, geometricTolerance) &&
                             IsPointOnSegment2D(endPt2d, blockLineStart2d, blockLineEnd2d, geometricTolerance))
                         {
-                            ed.WriteMessage($"\nDEBUG:     - Both segment points found ON blockLine segment. Match found!");
                             matchingBlockLine = blockLine;
-                            break; // Found matching line for this segment, move to next segment
-                        }
-                        else
-                        {
-                            ed.WriteMessage($"\nDEBUG:     - Segment points NOT both found on blockLine segment extent. (Endpoints not on blockLine segment)");
+                            break;
                         }
                     }
                 }
@@ -628,34 +855,32 @@ namespace MAEDA
                     allSegmentsFound = false;
                     break;
                 }
-                foundCellLines.Add(matchingBlockLine);
             }
 
-            if (!allSegmentsFound || foundCellLines.Count != 4)
+            if (!allSegmentsFound)
             {
-                ed.WriteMessage($"\nDEBUG: allSegmentsFound is {allSegmentsFound} or foundCellLines count ({foundCellLines.Count}) is not 4. Returning empty list.");
+                ed.WriteMessage($"\nDEBUG: Not all segments of the detected cell were found in the original block lines. Returning empty list.");
                 return new List<Point3d>();
             }
 
-            // 6. Optional rectangle validation (if enabled)
-            // Uncomment and use these if you want to strictly enforce parallelogram/rectangle properties
-            // The existing debug output should tell you if these conditions are met anyway.
+            // 7. Optional rectangle validation (Good to keep this as a final check)
             Vector2d v1_2d = new Vector2d(sortedCellCorners[1].X - sortedCellCorners[0].X, sortedCellCorners[1].Y - sortedCellCorners[0].Y);
             Vector2d v2_2d = new Vector2d(sortedCellCorners[2].X - sortedCellCorners[1].X, sortedCellCorners[2].Y - sortedCellCorners[1].Y);
             Vector2d v3_2d = new Vector2d(sortedCellCorners[3].X - sortedCellCorners[2].X, sortedCellCorners[3].Y - sortedCellCorners[2].Y);
             Vector2d v4_2d = new Vector2d(sortedCellCorners[0].X - sortedCellCorners[3].X, sortedCellCorners[0].Y - sortedCellCorners[3].Y);
 
             bool isParallelogram = IsEqualTo(v1_2d.Length, v3_2d.Length, geometricTolerance) && IsEqualTo(v2_2d.Length, v4_2d.Length, geometricTolerance);
-            bool isRectangle = IsZero(v1_2d.DotProduct(v2_2d), geometricTolerance * v1_2d.Length * v2_2d.Length); // Scale tolerance by lengths
+            bool isRectangle = IsZero(v1_2d.DotProduct(v2_2d), geometricTolerance * Math.Max(v1_2d.Length, v2_2d.Length));
 
             ed.WriteMessage($"\nDEBUG: Shape validation - IsParallelogram: {isParallelogram}, IsRectangle: {isRectangle}.");
 
-            // If you want to enforce these conditions, uncomment the returns:
-            // if (!isParallelogram) { ed.WriteMessage("\nDEBUG: Not a parallelogram."); return new List<Point3d>(); }
-            // if (!isRectangle) { ed.WriteMessage("\nDEBUG: Not a rectangle (non-perpendicular corners)."); return new List<Point3d>(); }
+            if (!isParallelogram || !isRectangle)
+            {
+                ed.WriteMessage("\nDEBUG: Detected cell is not a valid parallelogram or rectangle. Returning empty list.");
+                return new List<Point3d>();
+            }
 
-
-            // 7. Check clicked point inside cell
+            // 8. Check clicked point inside cell
             List<Point2d> polygonVertices2d = sortedCellCorners.Select(p => new Point2d(p.X, p.Y)).ToList();
             Point2d clickedPoint2d = new Point2d(clickedPointLocal.X, clickedPointLocal.Y);
 
@@ -734,13 +959,9 @@ namespace MAEDA
 
             public bool Equals(Point3d p1, Point3d p2)
             {
-                // Use custom IsEqualTo for each coordinate, or Point3d.IsEqualTo if reliable
                 return CommandCropByClick.IsEqualTo(p1.X, p2.X, _toleranceValue) &&
                        CommandCropByClick.IsEqualTo(p1.Y, p2.Y, _toleranceValue) &&
                        CommandCropByClick.IsEqualTo(p1.Z, p2.Z, _toleranceValue);
-                // Note: Autodesk.AutoCAD.Geometry.Point3d.IsEqualTo(Point3d, Tolerance) is also an option
-                // but sometimes direct comparison provides more control if it's failing.
-                // return p1.IsEqualTo(p2, new Tolerance(_toleranceValue, _toleranceValue));
             }
 
             public int GetHashCode(Point3d p)

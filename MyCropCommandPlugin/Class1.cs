@@ -66,7 +66,7 @@ public class CommandCropByClick
     {
         public const double SmallTolerance = 1e-9;
 
-        private const double geometricTolerance = 10.0; 
+        private  double geometricTolerance; 
 
         public static bool IsEqualTo(double d1, double d2, double tolerance)
         {
@@ -149,11 +149,31 @@ public class CommandCropByClick
                    pt.Y >= (minY - tolerance) && pt.Y <= (maxY + tolerance);
         }
 
+        private string GetLayerNameFromId(ObjectId layerId, Transaction tr, Database db)
+        {
+            if (layerId.IsNull)
+            {
+                return "";
+            }
+            try
+            {
+                LayerTableRecord ltr = (LayerTableRecord)tr.GetObject(layerId, OpenMode.ForRead);
+                return ltr.Name;
+            }
+            catch (System.Exception ex)
+            {
+                Application.DocumentManager.MdiActiveDocument.Editor.WriteMessage(
+                    $"\nERROR in GetLayerNameFromId: {ex.Message} for LayerId {layerId.ToString()}");
+                return "ERROR_LAYER_NAME";
+            }
+        }
+        
         [CommandMethod("CROPCLICK")]
         public void RunCommand()
         {
             Document doc = Application.DocumentManager.MdiActiveDocument;
             Database db = doc.Database;
+            geometricTolerance = 20 ;
             Editor ed = doc.Editor;
 
             string searchString = "通り符号"; 
@@ -202,24 +222,29 @@ public class CommandCropByClick
 
                 List<Line> blockLines = new List<Line>();
                 BlockTableRecord btr = (BlockTableRecord)tr.GetObject(targetBlockRef.BlockTableRecord, OpenMode.ForRead);
-                
+
                 // Collect all Line entities within the block definition
+                
                 foreach (ObjectId entityId in btr)
                 {
                     Entity ent = (Entity)tr.GetObject(entityId, OpenMode.ForRead);
-                    if (ent is Line line)
+                    if (ent is Line line )
                     {
-                        blockLines.Add(line);
+                        if (GetLayerNameFromId(line.LayerId, tr, db) == "★4通り芯" || GetLayerNameFromId(line.LayerId, tr, db) == "★4通り芯寸法")
+                        {
+                            blockLines.Add(line);
+                        }
+                        
                     }
                 }
 
                 if (blockLines.Count == 0)
                 {
                     ed.WriteMessage("\nThere is no Line in targetBlock");
-                    return;
+                    return; 
                 }
                 // --- Core Logic: Find the surrounding cell ---
-                List<Point3d> originalVertices = FindSurroundingCellPointssForRotatedGrid(
+                List<Point3d> originalVertices = FindSurroundingCellPointsForRotatedGrid(
                     clickedPointLocal, blockLines, ed, tr, btr, targetBlockRef); // Pass required objects
 
                 if (originalVertices.Count == 4)
@@ -296,7 +321,7 @@ public class CommandCropByClick
                             try
                             {
                                 // Define a large enough height for the clipping volume
-                                double clipVolumeHeight = 50000.0; // Adjust as necessary for your Z extent
+                                double clipVolumeHeight = 30000.0; // Adjust as necessary for your Z extent
 
                                 // Create a Point3dCollection for the clipping boundary vertices
                                 Point3dCollection clipPoints = new Point3dCollection();
@@ -398,17 +423,16 @@ public class CommandCropByClick
                 tr.Commit(); // Commit the transaction to save changes and draw entities
             }
         }
-
-        private List<Point3d> FindSurroundingCellPointssForRotatedGrid(
-            Point3d clickedPointLocal, List<Line> blockLines, Editor ed, Transaction tr, BlockTableRecord ms, BlockReference targetBlockRef)
+        private List<Point3d> FindSurroundingCellPointsForRotatedGrid(
+    Point3d clickedPointLocal, List<Line> blockLines, Editor ed, Transaction tr, BlockTableRecord ms, BlockReference targetBlockRef)
         {
-            double maxDistance = 50000.0; 
+            double maxDistance = 30000.0; // Example: assuming grid cells are around 1000 units on a side
 
             List<Line> candidateLines = blockLines
                 .Where(l => l.GetClosestPointTo(clickedPointLocal, false).DistanceTo(clickedPointLocal) < maxDistance)
                 .ToList();
 
-            ed.WriteMessage($"\nDEBUG: Found {candidateLines.Count} candidate lines within {maxDistance} of clickedPointLocal.");
+            ed.WriteMessage($"\nDEBUG: Found {candidateLines.Count} candidate lines within {maxDistance:F2} of clickedPointLocal.");
 
             if (candidateLines.Count < 2)
             {
@@ -416,8 +440,7 @@ public class CommandCropByClick
                 return new List<Point3d>();
             }
 
-            double intersectionTolerance = geometricTolerance; 
-            HashSet<Point3d> allIntersectionPoints = new HashSet<Point3d>(new Point3dComparer(intersectionTolerance));
+            HashSet<Point3d> allIntersectionPoints = new HashSet<Point3d>(new Point3dComparer(geometricTolerance));
 
             for (int i = 0; i < candidateLines.Count; i++)
             {
@@ -428,27 +451,37 @@ public class CommandCropByClick
 
                     foreach (Point3d pt in intersections)
                     {
-                        allIntersectionPoints.Add(pt); 
+                   
+                        allIntersectionPoints.Add(pt);
                     }
                 }
             }
             ed.WriteMessage($"\nDEBUG: Found {allIntersectionPoints.Count} unique intersection points.");
 
+            // --- Visual Debugging: Draw raw intersection points (magenta circles) ---
+            // Radius of the debug circle, proportional to maxDistance or a reasonable fixed size for visualization.
+            // This makes sure the circles are visible regardless of block scaling.
+            double debugCircleRadius = maxDistance * 0.01; // 1% of maxDistance, adjust as needed (e.g., 20.0 for 1000 unit cell)
+            if (debugCircleRadius < 1.0) debugCircleRadius = 1.0; // Minimum size for visibility
+
             if (allIntersectionPoints.Count > 0)
             {
-                ed.WriteMessage($"\nDEBUG: Drawing {allIntersectionPoints.Count} raw intersection points (magenta circles).");
-                ms.UpgradeOpen(); 
+                ed.WriteMessage($"\nDEBUG: Drawing {allIntersectionPoints.Count} raw intersection points (magenta circles). Radius: {debugCircleRadius:F2}");
+
+                // ms needs to be open for write to add debug geometry
+                ms.UpgradeOpen();
                 foreach (Point3d pt in allIntersectionPoints)
                 {
+                    // Transform the intersection point from Block Local to Global for drawing in Model Space
                     Point3d globalPt = pt.TransformBy(targetBlockRef.BlockTransform);
-                    using (Circle c = new Circle(globalPt, Vector3d.ZAxis, 20.0)) 
+                    using (Circle c = new Circle(globalPt, Vector3d.ZAxis, debugCircleRadius))
                     {
                         c.ColorIndex = 6; // Magenta
                         ms.AppendEntity(c);
                         tr.AddNewlyCreatedDBObject(c, true);
                     }
                 }
-                ms.DowngradeOpen(); 
+                ms.DowngradeOpen(); // Downgrade back to read if no more writes are immediately needed
             }
 
             List<Point3d> closestFourCorners = allIntersectionPoints
@@ -464,20 +497,21 @@ public class CommandCropByClick
                 return new List<Point3d>();
             }
 
+            // --- Visual Debugging: Draw 4 closest corners (green DBPoints) ---
             ed.WriteMessage($"\nDEBUG: Drawing 4 closest corners (green DBPoints).");
-            ms.UpgradeOpen();
+            ms.UpgradeOpen(); // Ensure ms is open for write
             foreach (Point3d pt in closestFourCorners)
             {
+                // Transform the corner point from Block Local to Global for drawing in Model Space
                 Point3d globalPt = pt.TransformBy(targetBlockRef.BlockTransform);
                 using (DBPoint dbPt = new DBPoint(globalPt))
                 {
-                    dbPt.ColorIndex = 3; 
+                    dbPt.ColorIndex = 3; // Green
                     ms.AppendEntity(dbPt);
                     tr.AddNewlyCreatedDBObject(dbPt, true);
                 }
             }
             ms.DowngradeOpen();
-
 
             List<Point3d> sortedCellCorners = SortPointsForPolyline(closestFourCorners);
             ed.WriteMessage($"\nDEBUG: Sorted cell corners: {string.Join(", ", sortedCellCorners.Select(p => $"({p.X:F1},{p.Y:F1})"))}");
@@ -486,11 +520,12 @@ public class CommandCropByClick
             if (sortedCellCorners.Count == 4)
             {
                 ed.WriteMessage($"\nDEBUG: Drawing temporary sorted polyline (yellow).");
-                ms.UpgradeOpen();
+                ms.UpgradeOpen(); // Ensure ms is open for write
                 Polyline tempSortedPoly = new Polyline();
                 tempSortedPoly.ColorIndex = 2; // Yellow
                 foreach (Point3d pt in sortedCellCorners)
                 {
+                    // Transform the sorted corner point from Block Local to Global for drawing in Model Space
                     Point3d globalPt = pt.TransformBy(targetBlockRef.BlockTransform);
                     tempSortedPoly.AddVertexAt(tempSortedPoly.NumberOfVertices, new Point2d(globalPt.X, globalPt.Y), 0, 0, 0);
                 }
@@ -502,9 +537,9 @@ public class CommandCropByClick
 
 
             // 5. Verify that the sorted points are indeed connected by actual lines from blockLines
-            // This is crucial for ensuring the detected corners truly form a cell defined by existing lines.
             List<Line> foundCellLines = new List<Line>();
             bool allSegmentsFound = true;
+            // World XY Plane is fine as a reference for 2D conversions, assuming grid is planar in XY
             Plane worldXYPlane = new Plane(Point3d.Origin, Vector3d.XAxis, Vector3d.YAxis);
 
             for (int i = 0; i < sortedCellCorners.Count; i++)
@@ -512,6 +547,7 @@ public class CommandCropByClick
                 Point3d startPt3d = sortedCellCorners[i];
                 Point3d endPt3d = sortedCellCorners[(i + 1) % sortedCellCorners.Count];
 
+                // Ensure these 2D points are derived from the BCS 3D points
                 Point2d startPt2d = new Point2d(startPt3d.X, startPt3d.Y);
                 Point2d endPt2d = new Point2d(endPt3d.X, endPt3d.Y);
 
@@ -528,28 +564,30 @@ public class CommandCropByClick
                 Line matchingBlockLine = null;
                 int linesCheckedForSegment = 0;
 
-                foreach (Line blockLine in blockLines)
+                foreach (Line blockLine in blockLines) // blockLines are already in BCS
                 {
                     linesCheckedForSegment++;
-                    Point2d blockLineStart2d = blockLine.StartPoint.Convert2d(worldXYPlane);
-                    Point2d blockLineEnd2d = blockLine.EndPoint.Convert2d(worldXYPlane);
+                    // Convert blockLine endpoints to 2D for comparison in BCS
+                    Point2d blockLineStart2d = new Point2d(blockLine.StartPoint.X, blockLine.StartPoint.Y);
+                    Point2d blockLineEnd2d = new Point2d(blockLine.EndPoint.X, blockLine.EndPoint.Y);
+
                     LineEquation2D blockLineEq = new LineEquation2D(blockLineStart2d, blockLineEnd2d);
 
                     // Check if the segment is collinear with the blockLine
                     if (segmentEquation.IsCoincident(blockLineEq, geometricTolerance))
                     {
-                        ed.WriteMessage($"\nDEBUG:   - Segment coincident with blockLine from ({blockLineStart2d.X:F1},{blockLineStart2d.Y:F1}) to ({blockLineEnd2d.X:F1},{blockLineEnd2d.Y:F1}).");
+                        ed.WriteMessage($"\nDEBUG:     - Segment coincident with blockLine from ({blockLineStart2d.X:F1},{blockLineStart2d.Y:F1}) to ({blockLineEnd2d.X:F1},{blockLineEnd2d.Y:F1}).");
                         // Check if the segment's endpoints lie on the blockLine segment (within tolerance)
                         if (IsPointOnSegment2D(startPt2d, blockLineStart2d, blockLineEnd2d, geometricTolerance) &&
                             IsPointOnSegment2D(endPt2d, blockLineStart2d, blockLineEnd2d, geometricTolerance))
                         {
-                            ed.WriteMessage($"\nDEBUG:     - Both segment points found ON blockLine segment. Match found!");
+                            ed.WriteMessage($"\nDEBUG:       - Both segment points found ON blockLine segment. Match found!");
                             matchingBlockLine = blockLine;
                             break; // Found matching line for this segment, move to next segment
                         }
                         else
                         {
-                            ed.WriteMessage($"\nDEBUG:     - Segment points NOT both found on blockLine segment extent. (Endpoints not on blockLine segment)");
+                            ed.WriteMessage($"\nDEBUG:       - Segment points NOT both found on blockLine segment extent. (Endpoints not on blockLine segment)");
                         }
                     }
                 }
@@ -570,8 +608,7 @@ public class CommandCropByClick
             }
 
             // 6. Optional rectangle validation (if enabled)
-            // Uncomment and use these if you want to strictly enforce parallelogram/rectangle properties
-            // The existing debug output should tell you if these conditions are met anyway.
+            // All these calculations should be done with BCS points
             Vector2d v1_2d = new Vector2d(sortedCellCorners[1].X - sortedCellCorners[0].X, sortedCellCorners[1].Y - sortedCellCorners[0].Y);
             Vector2d v2_2d = new Vector2d(sortedCellCorners[2].X - sortedCellCorners[1].X, sortedCellCorners[2].Y - sortedCellCorners[1].Y);
             Vector2d v3_2d = new Vector2d(sortedCellCorners[3].X - sortedCellCorners[2].X, sortedCellCorners[3].Y - sortedCellCorners[2].Y);
@@ -588,6 +625,7 @@ public class CommandCropByClick
 
 
             // 7. Check clicked point inside cell
+            // clickedPointLocal is already in BCS
             List<Point2d> polygonVertices2d = sortedCellCorners.Select(p => new Point2d(p.X, p.Y)).ToList();
             Point2d clickedPoint2d = new Point2d(clickedPointLocal.X, clickedPointLocal.Y);
 
@@ -685,5 +723,6 @@ public class CommandCropByClick
                 return xHash ^ yHash ^ zHash;
             }
         }
+        
     }
 }

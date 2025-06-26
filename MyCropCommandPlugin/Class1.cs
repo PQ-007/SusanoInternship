@@ -2,13 +2,11 @@
 using Autodesk.AutoCAD.ApplicationServices;
 using Autodesk.AutoCAD.DatabaseServices;
 using Autodesk.AutoCAD.EditorInput;
-using Autodesk.AutoCAD.Geometry; 
-using System.Collections.Generic; 
-using System.Linq; 
+using Autodesk.AutoCAD.Geometry;
+using System.Collections.Generic;
+using System.Linq;
 using System;
-using Autodesk.AutoCAD.GraphicsInterface;
-using Polyline = Autodesk.AutoCAD.DatabaseServices.Polyline;
-using System.Runtime.CompilerServices;
+
 
 [assembly: CommandClass(typeof(MAEDA.CommandCropByClick))]
 
@@ -19,59 +17,23 @@ namespace MAEDA
         public double A { get; private set; }
         public double B { get; private set; }
         public double C { get; private set; }
-
-        // Constructor to derive equation from two Point2d
-        public LineEquation2D(Point2d p1, Point2d p2)
-        {
-            // Calculate coefficients
-            A = p2.Y - p1.Y;
-            B = p1.X - p2.X;
-            C = -A * p1.X - B * p1.Y;
-
-            // Normalize the equation (A^2 + B^2 = 1) to make comparison easier
-            double magnitude = Math.Sqrt(A * A + B * B);
-            if (magnitude > CommandCropByClick.SmallTolerance) // Use a small, consistent tolerance like 1e-9 for normalization
-            {
-                A /= magnitude;
-                B /= magnitude;
-                C /= magnitude;
-            }
-            else // Degenerate line (points are coincident or too close)
-            {
-                A = 0; B = 0; C = 0; // Represents no valid line
-            }
-        }
-
-        // Method to check if two LineEquation2D objects represent the same infinite line
-        public bool IsCoincident(LineEquation2D other, double tolerance)
-        {
-            // After normalization, A, B, C should be approximately equal
-            // or exactly negative of each other (due to flipped normal vector direction).
-            // This is the check where the main geometricTolerance is critical for 'C'
-            bool aEqual = CommandCropByClick.IsEqualTo(this.A, other.A, tolerance);
-            bool bEqual = CommandCropByClick.IsEqualTo(this.B, other.B, tolerance);
-            bool cEqual = CommandCropByClick.IsEqualTo(this.C, other.C, tolerance);
-
-            bool aNegativeEqual = CommandCropByClick.IsEqualTo(this.A, -other.A, tolerance);
-            bool bNegativeEqual = CommandCropByClick.IsEqualTo(this.B, -other.B, tolerance);
-            bool cNegativeEqual = CommandCropByClick.IsEqualTo(this.C, -other.C, tolerance);
-
-            return (aEqual && bEqual && cEqual) || (aNegativeEqual && bNegativeEqual && cNegativeEqual);
-        }
-
+       
         // Helper to check if a Point2d lies on this line equation (within tolerance)
         public bool ContainsPoint(Point2d p, double tolerance)
         {
             return CommandCropByClick.IsZero(A * p.X + B * p.Y + C, tolerance);
         }
     }
-public class CommandCropByClick
+    public class CommandCropByClick
     {
         public const double SmallTolerance = 1e-9;
 
         private const double geometricTolerance = 10.0;
 
+        private const double maxDistance = 13000.0;
+
         private Dictionary<Point3d, List<Line>> _intersectionPointToLinesMap;
+
         public static bool IsEqualTo(double d1, double d2, double tolerance)
         {
             return Math.Abs(d1 - d2) < tolerance;
@@ -82,22 +44,215 @@ public class CommandCropByClick
             return Math.Abs(d) < tolerance;
         }
 
-        public static bool isPointOnLine(Line line, Point3d pt, double tolerance = 1e-9) 
+        public static bool isPointOnLine(Line line, Point3d pt, double tolerance = 1e-9)
         {
             Vector3d ap = pt - line.StartPoint;
             Vector3d ab = line.EndPoint - line.StartPoint;
 
+            // Check if point is collinear with the line segment
             Vector3d cross = ap.CrossProduct(ab);
             if (cross.Length > tolerance) return false;
 
+            // Check if point is within the bounds of the line segment
             double dot = ap.DotProduct(ab);
-            if (dot < -tolerance || dot > ab.LengthSqrd + tolerance) return true;
-            else return false;
+            if (dot < -tolerance || dot > ab.LengthSqrd + tolerance) return false;
+            return true;
         }
 
         public static double GetDistance(Point2d p1, Point2d p2)
         {
             return Math.Sqrt(Math.Pow(p2.X - p1.X, 2) + Math.Pow(p2.Y - p1.Y, 2));
+        }
+
+        public static List<int[]> LinesToGraphData(Point3d clickedPointGlobal, List<Line> blockLines, Editor ed, Transaction tr, BlockTableRecord ms, BlockReference blockRef)
+        {
+            // Convert clickedPointGlobal to local coordinates of the block reference
+            Matrix3d inverseTransform = blockRef.BlockTransform.Inverse();
+            Point3d clickedPointLocal = clickedPointGlobal.TransformBy(inverseTransform);
+            ed.WriteMessage($"\nClickedPoint(BlockLocal): {clickedPointLocal}");
+            // Find lines within a maxDistance from the clicked point
+            List<Line> candidateLines = blockLines
+                .Where(l => l.GetClosestPointTo(clickedPointLocal, false).DistanceTo(clickedPointLocal) < maxDistance)
+                .ToList();
+            ed.WriteMessage($"\nDEBUG: Found {candidateLines.Count} candidate lines within {maxDistance:F2} of clickedPointLocal.");
+
+            // Sorting candidateLines to iterate in it effectively
+            List<Line> horizontalLines = new List<Line>();
+            List<Line> verticalLines = new List<Line>();
+            double angleTolerance = 5.0 * (Math.PI / 180.0);
+
+            foreach (Line line in candidateLines)
+            {
+                Vector3d direction = line.EndPoint - line.StartPoint;
+                double angle = Math.Atan2(direction.Y, direction.X);
+
+                // Normalize angle to [0, π)
+                angle = (angle < 0) ? angle + Math.PI : angle;
+
+                // Check if line is horizontal (within tolerance of 0° or 180°)
+                if (angle < angleTolerance || Math.Abs(angle - Math.PI) < angleTolerance)
+                {
+                    horizontalLines.Add(line);
+                }
+                // Check if line is vertical (within tolerance of 90°)
+                else if (Math.Abs(angle - (Math.PI / 2)) < angleTolerance)
+                {
+                    verticalLines.Add(line);
+                }
+            }
+
+            // Sort horizontal lines (top-to-bottom, then left-to-right)
+            horizontalLines.Sort((a, b) =>
+            {
+                // Calculate midpoints manually (since Point3d + Point3d is not allowed)
+                Point3d midA = new Point3d(
+                    (a.StartPoint.X + a.EndPoint.X) * 0.5,
+                    (a.StartPoint.Y + a.EndPoint.Y) * 0.5,
+                    (a.StartPoint.Z + a.EndPoint.Z) * 0.5
+                );
+
+                Point3d midB = new Point3d(
+                    (b.StartPoint.X + b.EndPoint.X) * 0.5,
+                    (b.StartPoint.Y + b.EndPoint.Y) * 0.5,
+                    (b.StartPoint.Z + b.EndPoint.Z) * 0.5
+                );
+
+                // Sort by Y descending (top-to-bottom), then X ascending (left-to-right)
+                int yCompare = midB.Y.CompareTo(midA.Y); // Higher Y = top
+                if (yCompare != 0) return yCompare;
+                return midA.X.CompareTo(midB.X); // Lower X = left
+            });
+
+            // Sort vertical lines (left-to-right, then top-to-bottom)
+            verticalLines.Sort((a, b) =>
+            {
+                // Calculate midpoints manually
+                Point3d midA = new Point3d(
+                    (a.StartPoint.X + a.EndPoint.X) * 0.5,
+                    (a.StartPoint.Y + a.EndPoint.Y) * 0.5,
+                    (a.StartPoint.Z + a.EndPoint.Z) * 0.5
+                );
+
+                Point3d midB = new Point3d(
+                    (b.StartPoint.X + b.EndPoint.X) * 0.5,
+                    (b.StartPoint.Y + b.EndPoint.Y) * 0.5,
+                    (b.StartPoint.Z + b.EndPoint.Z) * 0.5
+                );
+
+                // Sort by X ascending (left-to-right), then Y descending (top-to-bottom)
+                int xCompare = midA.X.CompareTo(midB.X); // Lower X = left
+                if (xCompare != 0) return xCompare;
+                return midB.Y.CompareTo(midA.Y); // Higher Y = top
+            });
+
+            ed.WriteMessage($"\nSorted {horizontalLines.Count} horizontal and {verticalLines.Count} vertical lines.");
+
+
+            HashSet<Point3d> allIPoints = new HashSet<Point3d>(new Point3dComparer(geometricTolerance));
+
+
+            // Initialize the 2D list with correct dimensions
+            List<List<Point3d>> allIPoints2DList = new List<List<Point3d>>();
+            for (int i = 0; i < horizontalLines.Count; i++)
+            {
+                allIPoints2DList.Add(new List<Point3d>());
+                for (int j = 0; j < verticalLines.Count; j++)
+                {
+                    allIPoints2DList[i].Add(null); 
+                }
+            }
+            
+            // Finding intersections and populate the 2D list and print
+            for (int i = 0; i < horizontalLines.Count; i++)
+            {
+                for (int j = 0; j < verticalLines.Count; j++)
+                {
+                    Point3dCollection intersections = new Point3dCollection();
+                    horizontalLines[i].IntersectWith(
+                        verticalLines[j],
+                        Intersect.OnBothOperands,
+                        intersections,
+                        IntPtr.Zero,
+                        IntPtr.Zero
+                    );
+
+                    if (intersections.Count == 1)
+                    {
+                        allIPoints2DList[i][j] = intersections[0];
+                        allIPoints.Add(intersections[0]);
+                    }
+                }
+            }
+            ed.WriteMessage($"\n//-----------------//");
+            ed.WriteMessage($"\n");
+            for (int i = 0; i < horizontalLines.Count; i++)
+            {
+                for (int j = 0; j < verticalLines.Count; j++)
+                {
+                    ed.WriteMessage($"{ allIPoints2DList[i][j]}");
+                }
+                ed.WriteMessage($"\n");
+            }
+            ed.WriteMessage($"\n//-----------------//");
+            ed.WriteMessage($"\n");
+
+            // Transpose the 2D list (swap rows ↔ columns) and print
+            List<List<Point3d>> transposedList = new List<List<Point3d>>();
+            for (int j = 0; j < verticalLines.Count; j++)
+            {
+                transposedList.Add(new List<Point3d>());
+                for (int i = 0; i < horizontalLines.Count; i++)
+                {
+                    transposedList[j].Add(allIPoints2DList[i][j]); // Swap i ↔ j
+                }
+            }
+            for (int i = 0; i < verticalLines.Count; i++)
+            {
+                for (int j = 0; j < horizontalLines.Count; j++)
+                {
+                    ed.WriteMessage($"{transposedList[i][j]}");
+                }
+                ed.WriteMessage($"\n");
+            }
+            ed.WriteMessage($"\n//-----------------//");
+
+
+            // --- Visual Debugging: Draw raw intersection points (magenta circles) ---
+            double debugCircleRadius = maxDistance * 0.01;
+            if (debugCircleRadius < 1.0) debugCircleRadius = 1.0;
+            if (allIPoints.Count > 0)
+            {
+                ed.WriteMessage($"\nDEBUG: Drawing {allIPoints.Count} raw intersection points (magenta circles). Radius: {debugCircleRadius:F2}\n");
+                ms.UpgradeOpen();
+                foreach (Point3d pt in allIPoints)
+                {
+                    Point3d globalPt = pt.TransformBy(blockRef.BlockTransform);
+                    using (Circle c = new Circle(globalPt, Vector3d.ZAxis, debugCircleRadius))
+                    {
+                        c.ColorIndex = 6; // Magenta
+                        ms.AppendEntity(c);
+                        tr.AddNewlyCreatedDBObject(c, true);
+                    }
+                }
+                ms.DowngradeOpen();
+            }
+
+            
+
+            return new List<int[]>();
+        }
+
+        private List<Line> FindEnclosedPolygon(Point3d clickedPointGlobal, List<Line> blockLines, Editor ed, Transaction tr, BlockTableRecord ms, BlockReference blockRef)
+        {
+
+            LinesToGraphData(clickedPointGlobal, blockLines, ed, tr, ms, blockRef);
+
+
+
+
+
+
+            return new List<Line>(); // Return as before, or modify if you need the graph further up
         }
 
         [CommandMethod("CROPCLICK")]
@@ -168,81 +323,7 @@ public class CommandCropByClick
                 tr.Commit();
             }
         }
-        private List<Line> FindEnclosedPolygon(Point3d clickedPointGlobal, List<Line> blockLines, Editor ed, Transaction tr, BlockTableRecord ms, BlockReference blockRef)
-        {
-            // Convert clickedPointGlobal to local coordinates of the block reference
-            Matrix3d inverseTransform = blockRef.BlockTransform.Inverse();
-            Point3d clickedPointLocal = clickedPointGlobal.TransformBy(inverseTransform);
-            ed.WriteMessage($"\nClickedPoint(BlockLocal): {clickedPointLocal}");
-
-            _intersectionPointToLinesMap = new Dictionary<Point3d, List<Line>>(new Point3dComparer(geometricTolerance));
-
-            // Find lines within a maxDistance from the clicked point
-            double maxDistance = 13000.0;
-            List<Line> candidateLines = blockLines
-                .Where(l => l.GetClosestPointTo(clickedPointLocal, false).DistanceTo(clickedPointLocal) < maxDistance)
-                .ToList();
-            ed.WriteMessage($"\nDEBUG: Found {candidateLines.Count} candidate lines within {maxDistance:F2} of clickedPointLocal.");
-
-            HashSet<Point3d> allIPoints = new HashSet<Point3d>(new Point3dComparer(geometricTolerance));
-
-            for (int i = 0; i < candidateLines.Count; i++)
-            {
-                for (int j = i + 1; j < candidateLines.Count; j++)
-                {
-                    Point3dCollection intersections = new Point3dCollection();
-                    candidateLines[i].IntersectWith(candidateLines[j], Intersect.OnBothOperands, intersections, IntPtr.Zero, IntPtr.Zero);
-                   
-                    foreach (Point3d pt in intersections)
-                    {
-                        allIPoints.Add(pt);
-                    }
-                }
-            }
-
-            ???
-            //List<Dictionary<Point3d, List<Line>>> IPointToLinesMap = new List<Dictionary<Point3d, List<Line>>>();
-            //foreach (Point3d pt in allIPoints)
-            //{
-            //    List<Line> temp = new List<Line>();
-            //    foreach (Line line in candidateLines)
-            //    {
-            //        if (isPointOnLine(line, pt))
-            //        {
-            //            temp.Add(line);
-            //        }
-            //    }
-            //    IPointToLinesMap.Add({pt, temp});
-            //}
-
-            
-
-
-            ed.WriteMessage($"\nDEBUG: Found {allIPoints.Count} unique intersection points.");
-
-            // --- Visual Debugging: Draw raw intersection points (magenta circles) ---
-            double debugCircleRadius = maxDistance * 0.01; 
-            if (debugCircleRadius < 1.0) debugCircleRadius = 1.0; 
-
-            if (allIPoints.Count > 0)
-            {
-                ed.WriteMessage($"\nDEBUG: Drawing {allIPoints.Count} raw intersection points (magenta circles). Radius: {debugCircleRadius:F2}\n");
-                ms.UpgradeOpen();
-                foreach (Point3d pt in allIPoints)
-                {
-                    Point3d globalPt = pt.TransformBy(blockRef.BlockTransform);
-                    using (Circle c = new Circle(globalPt, Vector3d.ZAxis, debugCircleRadius))
-                    {
-                        c.ColorIndex = 6; // Magenta
-                        ms.AppendEntity(c);
-                        tr.AddNewlyCreatedDBObject(c, true);
-                    }
-                }
-                ms.DowngradeOpen(); 
-            }
-
-            return new List<Line>();
-        }
+        
 
         private class Point3dComparer : IEqualityComparer<Point3d>
         {
@@ -268,6 +349,13 @@ public class CommandCropByClick
                 return xHash ^ yHash ^ zHash;
             }
         }
-        
+
+        // Helper for comparing Point3d within tolerance directly
+        private static bool Equals(Point3d p1, Point3d p2, double tolerance)
+        {
+            return CommandCropByClick.IsEqualTo(p1.X, p2.X, tolerance) &&
+                   CommandCropByClick.IsEqualTo(p1.Y, p2.Y, tolerance) &&
+                   CommandCropByClick.IsEqualTo(p1.Z, p2.Z, tolerance);
+        }   
     }
 }

@@ -57,7 +57,66 @@ namespace MAEDA
             if (dot < -tolerance || dot > ab.LengthSqrd + tolerance) return false;
             return true;
         }
+        
+        private List<Point3d> InflateRectangle(List<Point3d> originalVertices, double percentage)
 
+        {
+
+            if (originalVertices == null || originalVertices.Count != 4)
+
+            {
+
+                return new List<Point3d>();
+
+            }
+
+
+
+            // Calculate centroid in 2D for inflation
+
+            Point2d centroid2d = Point2d.Origin;
+
+            foreach (Point3d p in originalVertices)
+
+            {
+
+                centroid2d = centroid2d + (new Point2d(p.X, p.Y).GetAsVector() / originalVertices.Count);
+
+            }
+
+
+
+            List<Point3d> inflatedVertices = new List<Point3d>();
+
+            foreach (Point3d p in originalVertices)
+
+            {
+
+                Point2d p2d = new Point2d(p.X, p.Y);
+
+                Vector2d vecFromCentroid2d = p2d - centroid2d;
+
+
+
+                // Scale the vector from centroid to inflate the point
+
+                Vector2d inflatedVec2d = vecFromCentroid2d * (1.0 + percentage);
+
+
+
+                // Create the new 3D point, keeping original Z
+
+                Point3d newP = new Point3d(centroid2d.X + inflatedVec2d.X, centroid2d.Y + inflatedVec2d.Y, p.Z);
+
+                inflatedVertices.Add(newP);
+
+            }
+
+
+
+            return inflatedVertices;
+
+        }
         public static double GetDistance(Point2d p1, Point2d p2)
         {
             return Math.Sqrt(Math.Pow(p2.X - p1.X, 2) + Math.Pow(p2.Y - p1.Y, 2));
@@ -337,20 +396,20 @@ namespace MAEDA
                     enclosedPolygonLines.Add(new Line(gp3, gp4));
                     enclosedPolygonLines.Add(new Line(gp4, gp1));
 
-                    // Optional: Draw the identified cell in a distinct color (e.g., red) for final verification
-                    ms.UpgradeOpen();
-                    using (Polyline identifiedPoly = new Polyline())
-                    {
-                        identifiedPoly.AddVertexAt(0, new Point2d(gp1.X, gp1.Y), 0, 0, 0);
-                        identifiedPoly.AddVertexAt(1, new Point2d(gp2.X, gp2.Y), 0, 0, 0);
-                        identifiedPoly.AddVertexAt(2, new Point2d(gp3.X, gp3.Y), 0, 0, 0);
-                        identifiedPoly.AddVertexAt(3, new Point2d(gp4.X, gp4.Y), 0, 0, 0);
-                        identifiedPoly.Closed = true;
-                        identifiedPoly.ColorIndex = 1; // Red (ACI color index 1)
-                        ms.AppendEntity(identifiedPoly);
-                        tr.AddNewlyCreatedDBObject(identifiedPoly, true);
-                    }
-                    ms.DowngradeOpen();
+                    //// Optional: Draw the identified cell in a distinct color (e.g., red) for final verification
+                    //ms.UpgradeOpen();
+                    //using (Polyline identifiedPoly = new Polyline())
+                    //{
+                    //    identifiedPoly.AddVertexAt(0, new Point2d(gp1.X, gp1.Y), 0, 0, 0);
+                    //    identifiedPoly.AddVertexAt(1, new Point2d(gp2.X, gp2.Y), 0, 0, 0);
+                    //    identifiedPoly.AddVertexAt(2, new Point2d(gp3.X, gp3.Y), 0, 0, 0);
+                    //    identifiedPoly.AddVertexAt(3, new Point2d(gp4.X, gp4.Y), 0, 0, 0);
+                    //    identifiedPoly.Closed = true;
+                    //    identifiedPoly.ColorIndex = 1; // Red (ACI color index 1)
+                    //    ms.AppendEntity(identifiedPoly);
+                    //    tr.AddNewlyCreatedDBObject(identifiedPoly, true);
+                    //}
+                    //ms.DowngradeOpen();
 
                     return enclosedPolygonLines;
                 }
@@ -372,7 +431,101 @@ namespace MAEDA
             return enclosedCellLines;
         }
 
+        private Polyline GetUnifiedOuterPolylineFromLines(List<Line> lines, Editor ed, Transaction tr, BlockTableRecord ms)
+        {
+            double tolerance = SmallTolerance;
+            var curves = new DBObjectCollection();
+            foreach (var line in lines)
+                curves.Add((Curve)line.Clone());
+            var regions = Region.CreateFromCurves(curves);
 
+            if (regions.Count == 0)
+            {
+                ed.WriteMessage("\n❌ Region creation failed. Check line connectivity.");
+                return null;
+            }
+
+            Region finalRegion = regions[0] as Region;
+            for (int i = 1; i < regions.Count; i++)
+            {
+                Region r = regions[i] as Region;
+                try
+                {
+                    finalRegion.BooleanOperation(BooleanOperationType.BoolUnite, r);
+                }
+                catch
+                {
+                    ed.WriteMessage($"\n⚠️ Boolean union failed for region {i}. Skipping.");
+                }
+            }
+
+            var exploded = new DBObjectCollection();
+            finalRegion.Explode(exploded);
+
+            var curvesList = exploded.Cast<Curve>().ToList();
+            if (curvesList.Count == 0)
+            {
+                ed.WriteMessage("\n⚠️ No boundary curves found.");
+                return null;
+            }
+
+            List<Point3d> ordered = new List<Point3d>();
+            Curve current = curvesList[0];
+            ordered.Add(current.StartPoint);
+            ordered.Add(current.EndPoint);
+            curvesList.RemoveAt(0);
+
+            while (curvesList.Count > 0)
+            {
+                Point3d last = ordered.Last();
+                int index = curvesList.FindIndex(c =>
+                    c.StartPoint.IsEqualTo(last, new Tolerance(tolerance, tolerance)) ||
+                    c.EndPoint.IsEqualTo(last, new Tolerance(tolerance, tolerance)));
+
+                if (index == -1)
+                {
+                    ed.WriteMessage("\n⚠️ Cannot find next connected segment.");
+                    break;
+                }
+                Curve next = curvesList[index];
+                curvesList.RemoveAt(index);
+
+                if (next.StartPoint.IsEqualTo(last, new Tolerance(tolerance, tolerance)))
+                    ordered.Add(next.EndPoint);
+                else
+                    ordered.Add(next.StartPoint);
+            }
+
+            var pl = new Polyline();
+
+            for (int i = 0; i < ordered.Count; i++)
+
+                pl.AddVertexAt(i, new Point2d(ordered[i].X, ordered[i].Y), 0, 0, 0);
+
+            pl.Closed = true;
+            pl.ColorIndex = 4;
+            ms.AppendEntity(pl);
+            tr.AddNewlyCreatedDBObject(pl,true);
+
+            // Inflated the Polygon
+            double inflatePercentange = 0.05;
+            List<Point3d> inflatedVertices = InflateRectangle(ordered, inflatePercentange);
+
+            Polyline inflatedPoly = new Polyline();
+            inflatedPoly.ColorIndex = 1; 
+            foreach (Point3d pt in inflatedVertices)
+            {
+                inflatedPoly.AddVertexAt(inflatedPoly.NumberOfVertices, new Point2d(pt.X, pt.Y), 0, 0, 0);
+            }
+            inflatedPoly.Closed = true;
+            ms.AppendEntity(inflatedPoly);
+            tr.AddNewlyCreatedDBObject(inflatedPoly, true);
+
+            return pl;
+
+        }
+
+        
         [CommandMethod("CROPCLICK")]
         public void RunCommand()
         {
@@ -420,7 +573,7 @@ namespace MAEDA
                 ed.WriteMessage($"\nClickedPoint(Global): {clickedPointGlobal}");
 
                 //Taking grid cell polygons from foundBlockRefs
-                List<List<Line>> allFoundGridCellPolygons = new List<List<Line>>();
+                List<Line> allFoundGridCellPolygons = new List<Line>();
                 foreach (BlockReference blockRef in foundBlockRefs)
                 {
                     // Open the block reference for read
@@ -440,8 +593,10 @@ namespace MAEDA
                     {
                         List<Line> foundPolygon = FindEnclosedPolygon(clickedPointGlobal, blockLines, ed, tr, ms, blockRef);
                         if (foundPolygon.Any())
-                        {
-                            allFoundGridCellPolygons.Add(foundPolygon);
+                        {   foreach (Line line in foundPolygon) {
+                                allFoundGridCellPolygons.Add(line);
+                            }
+                            
                         }
                     }
                 }
@@ -453,13 +608,10 @@ namespace MAEDA
                 else if (allFoundGridCellPolygons.Count > 1)
                 {
                     ed.WriteMessage("\nWarning: Multiple grid cells found containing the clicked point. Using the first one found.");
-                    // You might want to implement logic here to choose the "best" cell,
-                    // e.g., the one whose center is closest to the clicked point.
-                }
+                    // Flatten 2D list to linear
 
-                // Here, 'allFoundGridCellPolygons' (or its first element if multiple)
-                // contains the List<Line> representing the boundary of the clicked cell.
-                // You can now use these lines for your cropping logic.
+                    Polyline lastRes = GetUnifiedOuterPolylineFromLines(allFoundGridCellPolygons, ed, tr, ms);
+                }
 
                 tr.Commit();
             }
@@ -493,12 +645,6 @@ namespace MAEDA
             }
         }
 
-        // Helper for comparing Point3d within tolerance directly
-        private static bool Equals(Point3d p1, Point3d p2, double tolerance)
-        {
-            return CommandCropByClick.IsEqualTo(p1.X, p2.X, tolerance) &&
-                   CommandCropByClick.IsEqualTo(p1.Y, p2.Y, tolerance) &&
-                   CommandCropByClick.IsEqualTo(p1.Z, p2.Z, tolerance);
-        }
+        
     }
 }

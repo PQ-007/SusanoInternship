@@ -7,7 +7,6 @@ using System.Collections.Generic;
 using System.Linq;
 using System;
 
-
 [assembly: CommandClass(typeof(MAEDA.CommandCropByClick))]
 
 namespace MAEDA
@@ -17,13 +16,14 @@ namespace MAEDA
         public double A { get; private set; }
         public double B { get; private set; }
         public double C { get; private set; }
-       
+
         // Helper to check if a Point2d lies on this line equation (within tolerance)
         public bool ContainsPoint(Point2d p, double tolerance)
         {
             return CommandCropByClick.IsZero(A * p.X + B * p.Y + C, tolerance);
         }
     }
+
     public class CommandCropByClick
     {
         public const double SmallTolerance = 1e-9;
@@ -32,7 +32,7 @@ namespace MAEDA
 
         private const double maxDistance = 13000.0;
 
-        private Dictionary<Point3d, List<Line>> _intersectionPointToLinesMap;
+        private bool onManyBlockRef = false;
 
         public static bool IsEqualTo(double d1, double d2, double tolerance)
         {
@@ -43,7 +43,6 @@ namespace MAEDA
         {
             return Math.Abs(d) < tolerance;
         }
-
         public static bool isPointOnLine(Line line, Point3d pt, double tolerance = 1e-9)
         {
             Vector3d ap = pt - line.StartPoint;
@@ -70,6 +69,7 @@ namespace MAEDA
             Matrix3d inverseTransform = blockRef.BlockTransform.Inverse();
             Point3d clickedPointLocal = clickedPointGlobal.TransformBy(inverseTransform);
             ed.WriteMessage($"\nClickedPoint(BlockLocal): {clickedPointLocal}");
+
             // Find lines within a maxDistance from the clicked point
             List<Line> candidateLines = blockLines
                 .Where(l => l.GetClosestPointTo(clickedPointLocal, false).DistanceTo(clickedPointLocal) < maxDistance)
@@ -79,7 +79,7 @@ namespace MAEDA
             // Sorting candidateLines to iterate in it effectively
             List<Line> horizontalLines = new List<Line>();
             List<Line> verticalLines = new List<Line>();
-            double angleTolerance = 5.0 * (Math.PI / 180.0);
+            double angleTolerance = 5.0 * (Math.PI / 180.0); // 5 degrees tolerance
 
             foreach (Line line in candidateLines)
             {
@@ -104,7 +104,6 @@ namespace MAEDA
             // Sort horizontal lines (top-to-bottom, then left-to-right)
             horizontalLines.Sort((a, b) =>
             {
-                // Calculate midpoints manually (since Point3d + Point3d is not allowed)
                 Point3d midA = new Point3d(
                     (a.StartPoint.X + a.EndPoint.X) * 0.5,
                     (a.StartPoint.Y + a.EndPoint.Y) * 0.5,
@@ -117,16 +116,15 @@ namespace MAEDA
                     (b.StartPoint.Z + b.EndPoint.Z) * 0.5
                 );
 
-                // Sort by Y descending (top-to-bottom), then X ascending (left-to-right)
-                int yCompare = midB.Y.CompareTo(midA.Y); // Higher Y = top
+                // Sort by Y descending (higher Y is "top"), then X ascending (lower X is "left")
+                int yCompare = midB.Y.CompareTo(midA.Y);
                 if (yCompare != 0) return yCompare;
-                return midA.X.CompareTo(midB.X); // Lower X = left
+                return midA.X.CompareTo(midB.X);
             });
 
             // Sort vertical lines (left-to-right, then top-to-bottom)
             verticalLines.Sort((a, b) =>
             {
-                // Calculate midpoints manually
                 Point3d midA = new Point3d(
                     (a.StartPoint.X + a.EndPoint.X) * 0.5,
                     (a.StartPoint.Y + a.EndPoint.Y) * 0.5,
@@ -139,27 +137,24 @@ namespace MAEDA
                     (b.StartPoint.Z + b.EndPoint.Z) * 0.5
                 );
 
-                // Sort by X ascending (left-to-right), then Y descending (top-to-bottom)
-                int xCompare = midA.X.CompareTo(midB.X); // Lower X = left
+                // Sort by X ascending (lower X is "left"), then Y descending (higher Y is "top")
+                int xCompare = midA.X.CompareTo(midB.X);
                 if (xCompare != 0) return xCompare;
-                return midB.Y.CompareTo(midA.Y); // Higher Y = top
+                return midB.Y.CompareTo(midA.Y);
             });
 
             ed.WriteMessage($"\nSorted {horizontalLines.Count} horizontal and {verticalLines.Count} vertical lines.");
 
-
             HashSet<Point3d> allIPoints = new HashSet<Point3d>(new Point3dComparer(geometricTolerance));
 
-
             // Initialize the 2D list with correct dimensions
-            List<List<Point3d?>> allIPoints2DList = new List<List<Point3d?>>(); // Outer list correctly holds lists of nullable Point3d
+            List<List<Point3d?>> allIPoints2DList = new List<List<Point3d?>>();
             for (int i = 0; i < horizontalLines.Count; i++)
             {
-                // The inner list must also be of type List<Point3d?>
                 allIPoints2DList.Add(new List<Point3d?>());
                 for (int j = 0; j < verticalLines.Count; j++)
                 {
-                    allIPoints2DList[i].Add(null); // Now this is valid because the inner list holds Point3d?
+                    allIPoints2DList[i].Add(null);
                 }
             }
 
@@ -184,19 +179,16 @@ namespace MAEDA
                     }
                 }
             }
-            ed.WriteMessage($"\n//-----------------//");
-            ed.WriteMessage($"\n");
+            ed.WriteMessage($"\n//--- Raw Intersection Points (Local Block Coordinates) ---//");
             for (int i = 0; i < horizontalLines.Count; i++)
             {
                 for (int j = 0; j < verticalLines.Count; j++)
                 {
-                    ed.WriteMessage($"{ allIPoints2DList[i][j]}");
+                    ed.WriteMessage($"[{i},{j}]: {allIPoints2DList[i][j]} ");
                 }
                 ed.WriteMessage($"\n");
             }
-            ed.WriteMessage($"\n");
-            ed.WriteMessage($"\n//-----------------//");
-            
+            ed.WriteMessage($"\n//---------------------------------------------------------//");
 
             // --- Visual Debugging: Draw raw intersection points (magenta circles) ---
             double debugCircleRadius = maxDistance * 0.01;
@@ -218,7 +210,6 @@ namespace MAEDA
                 ms.DowngradeOpen();
             }
 
-
             // --- Bundling four intersection points into one cell ---
             List<Point3d[]> gridData = new List<Point3d[]>();
 
@@ -237,63 +228,150 @@ namespace MAEDA
                 }
             }
 
-            // Visual Debugging: Draw grid cells (cyan rectangles) with  2% bigger margin
-            double marginOffset = 50.0; 
+            // Visual Debugging: Draw grid cells (cyan rectangles) with 2% bigger margin
+            double marginOffset = 50.0; // This margin offset should be handled carefully if you want exact polygon bounds.
+                                        // For visual debugging, it's fine. For actual cropping, use the exact bounds.
 
-            if (gridData.Count > 0)
-            {
-                ed.WriteMessage($"\nDEBUG: Drawing {gridData.Count} grid cells (cyan rectangles) with offset.\n");
-                ms.UpgradeOpen();
-                foreach (Point3d[] cell in gridData)
-                {
-                    using (Polyline poly = new Polyline())
-                    {
-                        double centerX = cell.Average(p => p.X);
-                        double centerY = cell.Average(p => p.Y);
-                        Point3d center = new Point3d(centerX, centerY, 0); 
+            //if (gridData.Count > 0)
+            //{
+            //    ed.WriteMessage($"\nDEBUG: Drawing {gridData.Count} grid cells (cyan rectangles) with offset.\n");
+            //    ms.UpgradeOpen();
+            //    foreach (Point3d[] cell in gridData)
+            //    {
+            //        using (Polyline poly = new Polyline())
+            //        {
+            //            // Calculate center for offset direction (in local block coordinates)
+            //            double centerX = cell.Average(p => p.X);
+            //            double centerY = cell.Average(p => p.Y);
+            //            Point3d centerLocal = new Point3d(centerX, centerY, 0);
 
-                        for (int k = 0; k < cell.Length; k++)
-                        {
-                            Point3d globalCellPoint = cell[k].TransformBy(blockRef.BlockTransform);
-                            Vector3d direction = globalCellPoint - center;
-                            if (direction.Length > 0)
-                            {
-                                direction = direction.GetNormal();
-                            }
-                            Point3d offsetGlobalPoint = globalCellPoint - (direction * marginOffset);
-                            poly.AddVertexAt(k, new Point2d(offsetGlobalPoint.X, offsetGlobalPoint.Y), 0, 0, 0);
-                        }
-                        poly.Closed = true;
-                        poly.ColorIndex = 4; // Cyan
-
-                        ms.AppendEntity(poly);
-                        tr.AddNewlyCreatedDBObject(poly, true);
-                    }
-                }
-                ms.DowngradeOpen();
-            }
+            //            // Collect points for the polyline, applying offset and transforming to global
+            //            // The order is important to form a closed polygon
+            //            Point3d[] orderedCellPoints = new Point3d[4];
+            //            // Assuming gridData is ordered as {top-left, top-right, bottom-right, bottom-left}
+            //            // based on the sorting logic and how allIPoints2DList is populated
+            //            // p1 (i,j) -> top-left
+            //            // p2 (i,j+1) -> top-right
+            //            // p3 (i+1,j+1) -> bottom-right
+            //            // p4 (i+1,j) -> bottom-left
+            //            orderedCellPoints[0] = cell[0]; // p1
+            //            orderedCellPoints[1] = cell[1]; // p2
+            //            orderedCellPoints[2] = cell[2]; // p3
+            //            orderedCellPoints[3] = cell[3]; // p4
 
 
-            return gridData;
+            //            for (int k = 0; k < orderedCellPoints.Length; k++)
+            //            {
+            //                Point3d localCellPoint = orderedCellPoints[k];
+
+            //                // Calculate direction vector from cell center to the current point
+            //                Vector3d direction = localCellPoint - centerLocal;
+            //                if (direction.Length > SmallTolerance) // Avoid division by zero for coincident points
+            //                {
+            //                    direction = direction.GetNormal();
+            //                }
+
+            //                // Apply offset (towards the center)
+            //                Point3d offsetLocalPoint = localCellPoint - (direction * marginOffset);
+
+            //                // Transform to global coordinates for drawing
+            //                Point3d globalOffsetPoint = offsetLocalPoint.TransformBy(blockRef.BlockTransform);
+            //                poly.AddVertexAt(k, new Point2d(globalOffsetPoint.X, globalOffsetPoint.Y), 0, 0, 0);
+            //            }
+            //            poly.Closed = true;
+            //            poly.ColorIndex = 4; // Cyan
+
+            //            ms.AppendEntity(poly);
+            //            tr.AddNewlyCreatedDBObject(poly, true);
+            //        }
+            //    }
+            //    ms.DowngradeOpen();
+            //}
+
+            return gridData; // Returns the list of 4-point arrays representing cells in BLOCK LOCAL coordinates
         }
 
         public static List<Line> RayCastingInGridCells(Point3d clickedPointGlobal, List<Point3d[]> gridData, Editor ed, Transaction tr, BlockTableRecord ms, BlockReference blockRef)
         {
-            List<Line> niceCell = new List<Line>();
+            // 1. Transform clickedPointGlobal to the block's local coordinates
+            Matrix3d inverseTransform = blockRef.BlockTransform.Inverse();
+            Point3d clickedPointLocal = clickedPointGlobal.TransformBy(inverseTransform);
 
-            return niceCell;
+            ed.WriteMessage($"\nDEBUG: RayCasting - Clicked Point Local (for this block): {clickedPointLocal}");
+
+            // Iterate through each potential grid cell
+            foreach (Point3d[] cell in gridData)
+            {
+                // Determine min/max X and Y from the cell's points in local coordinates.
+                // Assuming `cell` contains points that form a rectangle or a quadrilateral close to it.
+                // The points are expected to be {p1, p2, p3, p4} in some order (e.g., TL, TR, BR, BL or similar).
+                double minX = cell.Min(p => p.X);
+                double maxX = cell.Max(p => p.X);
+                double minY = cell.Min(p => p.Y);
+                double maxY = cell.Max(p => p.Y);
+
+                double clickTolerance = 1.0;
+
+                // Perform a simple bounding box check. For axis-aligned rectangles, this is sufficient.
+                // We use tolerance for inclusive boundary checks.   
+                bool inX = clickedPointLocal.X >= minX - clickTolerance && clickedPointLocal.X <= maxX + clickTolerance;
+                bool inY = clickedPointLocal.Y >= minY - clickTolerance && clickedPointLocal.Y <= maxY + clickTolerance;
+
+                if (inX && inY)
+                {
+                    ed.WriteMessage($"\nDEBUG: Clicked point {clickedPointLocal} found inside a grid cell in local coordinates.");
+
+                    // This is the cell the user clicked inside.
+                    // Create the boundary lines for this cell. These lines should be in GLOBAL coordinates.
+                    List<Line> enclosedPolygonLines = new List<Line>();
+
+                    // Transform local cell points back to global coordinates to create the lines
+                    Point3d gp1 = cell[0].TransformBy(blockRef.BlockTransform);
+                    Point3d gp2 = cell[1].TransformBy(blockRef.BlockTransform);
+                    Point3d gp3 = cell[2].TransformBy(blockRef.BlockTransform);
+                    Point3d gp4 = cell[3].TransformBy(blockRef.BlockTransform);
+
+                    // Create lines forming the rectangle
+                    enclosedPolygonLines.Add(new Line(gp1, gp2));
+                    enclosedPolygonLines.Add(new Line(gp2, gp3));
+                    enclosedPolygonLines.Add(new Line(gp3, gp4));
+                    enclosedPolygonLines.Add(new Line(gp4, gp1));
+
+                    // Optional: Draw the identified cell in a distinct color (e.g., red) for final verification
+                    ms.UpgradeOpen();
+                    using (Polyline identifiedPoly = new Polyline())
+                    {
+                        identifiedPoly.AddVertexAt(0, new Point2d(gp1.X, gp1.Y), 0, 0, 0);
+                        identifiedPoly.AddVertexAt(1, new Point2d(gp2.X, gp2.Y), 0, 0, 0);
+                        identifiedPoly.AddVertexAt(2, new Point2d(gp3.X, gp3.Y), 0, 0, 0);
+                        identifiedPoly.AddVertexAt(3, new Point2d(gp4.X, gp4.Y), 0, 0, 0);
+                        identifiedPoly.Closed = true;
+                        identifiedPoly.ColorIndex = 1; // Red (ACI color index 1)
+                        ms.AppendEntity(identifiedPoly);
+                        tr.AddNewlyCreatedDBObject(identifiedPoly, true);
+                    }
+                    ms.DowngradeOpen();
+
+                    return enclosedPolygonLines;
+                }
+            }
+
+            ed.WriteMessage($"\nDEBUG: Clicked point {clickedPointLocal} not found inside any grid cell for this block (in local coordinates).");
+            return new List<Line>(); // Return empty list if no cell found
         }
+
         private List<Line> FindEnclosedPolygon(Point3d clickedPointGlobal, List<Line> blockLines, Editor ed, Transaction tr, BlockTableRecord ms, BlockReference blockRef)
         {
+            // gridData contains the 4 corner points of each cell in the BLOCK'S LOCAL COORDINATES
             List<Point3d[]> gridData = LinesToConnectedGridPointData(clickedPointGlobal, blockLines, ed, tr, ms, blockRef);
 
-            List<Line> result = RayCastingInGridCells(clickedPointGlobal, gridData, ed, tr, ms, blockRef);
+            // Pass blockRef to RayCastingInGridCells so it can transform the clicked point
+            List<Line> enclosedCellLines = RayCastingInGridCells(clickedPointGlobal, gridData, ed, tr, ms, blockRef);
 
-
-
-
-            return new List<Line>(); // Return as before, or modify if you need the graph further up
+            // Return the lines of the found cell. If nothing was found, it will be an empty list.
+            return enclosedCellLines;
         }
+
 
         [CommandMethod("CROPCLICK")]
         public void RunCommand()
@@ -342,7 +420,7 @@ namespace MAEDA
                 ed.WriteMessage($"\nClickedPoint(Global): {clickedPointGlobal}");
 
                 //Taking grid cell polygons from foundBlockRefs
-                List<List<Line>> gridCellPolygons = new List<List<Line>>();
+                List<List<Line>> allFoundGridCellPolygons = new List<List<Line>>();
                 foreach (BlockReference blockRef in foundBlockRefs)
                 {
                     // Open the block reference for read
@@ -358,12 +436,34 @@ namespace MAEDA
                             blockLines.Add(line);
                         }
                     }
-                    gridCellPolygons.Add(FindEnclosedPolygon(clickedPointGlobal, blockLines, ed, tr, ms, blockRef));
+                    if (blockLines.Any()) // Only process blocks that actually contain lines on the target layer
+                    {
+                        List<Line> foundPolygon = FindEnclosedPolygon(clickedPointGlobal, blockLines, ed, tr, ms, blockRef);
+                        if (foundPolygon.Any())
+                        {
+                            allFoundGridCellPolygons.Add(foundPolygon);
+                        }
+                    }
                 }
+
+                if (allFoundGridCellPolygons.Count == 0)
+                {
+                    ed.WriteMessage("\nNo grid cell found containing the clicked point in any relevant block.");
+                }
+                else if (allFoundGridCellPolygons.Count > 1)
+                {
+                    ed.WriteMessage("\nWarning: Multiple grid cells found containing the clicked point. Using the first one found.");
+                    // You might want to implement logic here to choose the "best" cell,
+                    // e.g., the one whose center is closest to the clicked point.
+                }
+
+                // Here, 'allFoundGridCellPolygons' (or its first element if multiple)
+                // contains the List<Line> representing the boundary of the clicked cell.
+                // You can now use these lines for your cropping logic.
+
                 tr.Commit();
             }
         }
-        
 
         private class Point3dComparer : IEqualityComparer<Point3d>
         {
@@ -383,6 +483,9 @@ namespace MAEDA
 
             public int GetHashCode(Point3d p)
             {
+                // Simple hashing by rounding to tolerance; more robust for larger tolerances.
+                // For very small tolerances, direct double hash codes might be more appropriate,
+                // but for Point3d comparisons with tolerance, this is a common approach.
                 int xHash = Math.Round(p.X / _toleranceValue).GetHashCode();
                 int yHash = Math.Round(p.Y / _toleranceValue).GetHashCode();
                 int zHash = Math.Round(p.Z / _toleranceValue).GetHashCode();
@@ -396,6 +499,6 @@ namespace MAEDA
             return CommandCropByClick.IsEqualTo(p1.X, p2.X, tolerance) &&
                    CommandCropByClick.IsEqualTo(p1.Y, p2.Y, tolerance) &&
                    CommandCropByClick.IsEqualTo(p1.Z, p2.Z, tolerance);
-        }   
+        }
     }
 }

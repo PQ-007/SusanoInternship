@@ -64,7 +64,7 @@ namespace MAEDA
             return Math.Sqrt(Math.Pow(p2.X - p1.X, 2) + Math.Pow(p2.Y - p1.Y, 2));
         }
 
-        public static List<int[]> LinesToGraphData(Point3d clickedPointGlobal, List<Line> blockLines, Editor ed, Transaction tr, BlockTableRecord ms, BlockReference blockRef)
+        public static List<Point3d[]> LinesToConnectedGridPointData(Point3d clickedPointGlobal, List<Line> blockLines, Editor ed, Transaction tr, BlockTableRecord ms, BlockReference blockRef)
         {
             // Convert clickedPointGlobal to local coordinates of the block reference
             Matrix3d inverseTransform = blockRef.BlockTransform.Inverse();
@@ -152,16 +152,17 @@ namespace MAEDA
 
 
             // Initialize the 2D list with correct dimensions
-            List<List<Point3d>> allIPoints2DList = new List<List<Point3d>>();
+            List<List<Point3d?>> allIPoints2DList = new List<List<Point3d?>>(); // Outer list correctly holds lists of nullable Point3d
             for (int i = 0; i < horizontalLines.Count; i++)
             {
-                allIPoints2DList.Add(new List<Point3d>());
+                // The inner list must also be of type List<Point3d?>
+                allIPoints2DList.Add(new List<Point3d?>());
                 for (int j = 0; j < verticalLines.Count; j++)
                 {
-                    allIPoints2DList[i].Add(null); 
+                    allIPoints2DList[i].Add(null); // Now this is valid because the inner list holds Point3d?
                 }
             }
-            
+
             // Finding intersections and populate the 2D list and print
             for (int i = 0; i < horizontalLines.Count; i++)
             {
@@ -193,29 +194,9 @@ namespace MAEDA
                 }
                 ed.WriteMessage($"\n");
             }
-            ed.WriteMessage($"\n//-----------------//");
             ed.WriteMessage($"\n");
-
-            // Transpose the 2D list (swap rows ↔ columns) and print
-            List<List<Point3d>> transposedList = new List<List<Point3d>>();
-            for (int j = 0; j < verticalLines.Count; j++)
-            {
-                transposedList.Add(new List<Point3d>());
-                for (int i = 0; i < horizontalLines.Count; i++)
-                {
-                    transposedList[j].Add(allIPoints2DList[i][j]); // Swap i ↔ j
-                }
-            }
-            for (int i = 0; i < verticalLines.Count; i++)
-            {
-                for (int j = 0; j < horizontalLines.Count; j++)
-                {
-                    ed.WriteMessage($"{transposedList[i][j]}");
-                }
-                ed.WriteMessage($"\n");
-            }
             ed.WriteMessage($"\n//-----------------//");
-
+            
 
             // --- Visual Debugging: Draw raw intersection points (magenta circles) ---
             double debugCircleRadius = maxDistance * 0.01;
@@ -237,17 +218,76 @@ namespace MAEDA
                 ms.DowngradeOpen();
             }
 
-            
 
-            return new List<int[]>();
+            // --- Bundling four intersection points into one cell ---
+            List<Point3d[]> gridData = new List<Point3d[]>();
+
+            for (int i = 0; i < allIPoints2DList.Count - 1; i++)
+            {
+                for (int j = 0; j < allIPoints2DList[i].Count - 1; j++)
+                {
+                    Point3d? p1 = allIPoints2DList[i][j];
+                    Point3d? p2 = allIPoints2DList[i][j + 1];
+                    Point3d? p3 = allIPoints2DList[i + 1][j + 1];
+                    Point3d? p4 = allIPoints2DList[i + 1][j];
+                    if (p1.HasValue && p2.HasValue && p3.HasValue && p4.HasValue)
+                    {
+                        gridData.Add(new Point3d[] { p1.Value, p2.Value, p3.Value, p4.Value });
+                    }
+                }
+            }
+
+            // Visual Debugging: Draw grid cells (cyan rectangles) with  2% bigger margin
+            double marginOffset = 50.0; 
+
+            if (gridData.Count > 0)
+            {
+                ed.WriteMessage($"\nDEBUG: Drawing {gridData.Count} grid cells (cyan rectangles) with offset.\n");
+                ms.UpgradeOpen();
+                foreach (Point3d[] cell in gridData)
+                {
+                    using (Polyline poly = new Polyline())
+                    {
+                        double centerX = cell.Average(p => p.X);
+                        double centerY = cell.Average(p => p.Y);
+                        Point3d center = new Point3d(centerX, centerY, 0); 
+
+                        for (int k = 0; k < cell.Length; k++)
+                        {
+                            Point3d globalCellPoint = cell[k].TransformBy(blockRef.BlockTransform);
+                            Vector3d direction = globalCellPoint - center;
+                            if (direction.Length > 0)
+                            {
+                                direction = direction.GetNormal();
+                            }
+                            Point3d offsetGlobalPoint = globalCellPoint - (direction * marginOffset);
+                            poly.AddVertexAt(k, new Point2d(offsetGlobalPoint.X, offsetGlobalPoint.Y), 0, 0, 0);
+                        }
+                        poly.Closed = true;
+                        poly.ColorIndex = 4; // Cyan
+
+                        ms.AppendEntity(poly);
+                        tr.AddNewlyCreatedDBObject(poly, true);
+                    }
+                }
+                ms.DowngradeOpen();
+            }
+
+
+            return gridData;
         }
 
+        public static List<Line> RayCastingInGridCells(Point3d clickedPointGlobal, List<Point3d[]> gridData, Editor ed, Transaction tr, BlockTableRecord ms, BlockReference blockRef)
+        {
+            List<Line> niceCell = new List<Line>();
+
+            return niceCell;
+        }
         private List<Line> FindEnclosedPolygon(Point3d clickedPointGlobal, List<Line> blockLines, Editor ed, Transaction tr, BlockTableRecord ms, BlockReference blockRef)
         {
+            List<Point3d[]> gridData = LinesToConnectedGridPointData(clickedPointGlobal, blockLines, ed, tr, ms, blockRef);
 
-            LinesToGraphData(clickedPointGlobal, blockLines, ed, tr, ms, blockRef);
-
-
+            List<Line> result = RayCastingInGridCells(clickedPointGlobal, gridData, ed, tr, ms, blockRef);
 
 
 

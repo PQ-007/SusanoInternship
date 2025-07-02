@@ -3,7 +3,7 @@ Microsoft Visual Studio Solution File, Format Version 12.00
 # Visual Studio Version 17
 VisualStudioVersion = 17.14.36212.18 d17.14
 MinimumVisualStudioVersion = 10.0.40219.1
-Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "SimpleWebviewer", "SimpleWebviewer.csproj", "{A1744F0E-9F27-4720-B50F-EECD15E23F67}"
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "MyForgeApp", "MyForgeApp.csproj", "{B298BB4E-6B4A-46E5-914D-1FFADDF4FBF2}"
 EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
@@ -11,15 +11,15 @@ Global
 		Release|Any CPU = Release|Any CPU
 	EndGlobalSection
 	GlobalSection(ProjectConfigurationPlatforms) = postSolution
-		{A1744F0E-9F27-4720-B50F-EECD15E23F67}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
-		{A1744F0E-9F27-4720-B50F-EECD15E23F67}.Debug|Any CPU.Build.0 = Debug|Any CPU
-		{A1744F0E-9F27-4720-B50F-EECD15E23F67}.Release|Any CPU.ActiveCfg = Release|Any CPU
-		{A1744F0E-9F27-4720-B50F-EECD15E23F67}.Release|Any CPU.Build.0 = Release|Any CPU
+		{B298BB4E-6B4A-46E5-914D-1FFADDF4FBF2}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{B298BB4E-6B4A-46E5-914D-1FFADDF4FBF2}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{B298BB4E-6B4A-46E5-914D-1FFADDF4FBF2}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{B298BB4E-6B4A-46E5-914D-1FFADDF4FBF2}.Release|Any CPU.Build.0 = Release|Any CPU
 	EndGlobalSection
 	GlobalSection(SolutionProperties) = preSolution
 		HideSolutionNode = FALSE
 	EndGlobalSection
 	GlobalSection(ExtensibilityGlobals) = postSolution
-		SolutionGuid = {32D7CBD7-F8C6-4ABF-BDFC-BA6BC9BEF113}
+		SolutionGuid = {8F7AD1ED-BB8E-4B82-B6E8-76CCA169ED60}
 	EndGlobalSection
 EndGlobal

@@ -15,6 +15,7 @@ async function setupModelSelection(viewer, selectedUrn) {
             throw new Error(await resp.text());
         }
         const models = await resp.json();
+        console.log(models); // <-- Print models to the console
         dropdown.innerHTML = models.map(model => `<option value=${model.urn} ${model.urn === selectedUrn ? 'selected' : ''}>${model.name}</option>`).join('\n');
         dropdown.onchange = () => onModelSelected(viewer, dropdown.value);
         if (dropdown.value) {
@@ -26,6 +27,7 @@ async function setupModelSelection(viewer, selectedUrn) {
     }
 }
 
+
 async function setupModelUpload(viewer) {
     const upload = document.getElementById('upload');
     const input = document.getElementById('input');
@@ -33,33 +35,51 @@ async function setupModelUpload(viewer) {
     upload.onclick = () => input.click();
     input.onchange = async () => {
         const file = input.files[0];
+        if (!file) return;
+
         let data = new FormData();
         data.append('model-file', file);
-        if (file.name.endsWith('.zip')) { // When uploading a zip file, ask for the main design file in the archive
-            const entrypoint = window.prompt('Please enter the filename of the main design inside the archive.');
+
+        // ✅ Only ask for entrypoint if ZIP
+        if (file.name.toLowerCase().endsWith('.zip')) {
+            let entrypoint = null;
+            while (!entrypoint) {
+                entrypoint = window.prompt('Please enter the filename of the main design inside the archive (required):');
+                if (entrypoint === null) {
+                    // User cancelled, abort upload
+                    input.value = '';
+                    return;
+                }
+                entrypoint = entrypoint.trim();
+            }
             data.append('model-zip-entrypoint', entrypoint);
         }
-        upload.setAttribute('disabled', 'true');
-        models.setAttribute('disabled', 'true');
-        showNotification(`Uploading model <em>${file.name}</em>. Do not reload the page.`);
+
+        // Debug: Show what is being sent
+        console.log('Uploading file:', file.name, 'FormData:', Array.from(data.entries()));
+
         try {
-            const resp = await fetch('/api/models', { method: 'POST', body: data });
+            const resp = await fetch('/api/models', {
+                method: 'POST',
+                body: data
+            });
             if (!resp.ok) {
                 throw new Error(await resp.text());
             }
-            const model = await resp.json();
-            setupModelSelection(viewer, model.urn);
+            alert('Upload successful!');
+            setupModelSelection(viewer); // Refresh model list
         } catch (err) {
-            alert(`Could not upload model ${file.name}. See the console for more details.`);
+            alert('Upload failed. See the console for more details.');
             console.error(err);
         } finally {
-            clearNotification();
-            upload.removeAttribute('disabled');
-            models.removeAttribute('disabled');
-            input.value = '';
+            input.value = ''; // Reset file input
         }
     };
 }
+
+
+
+
 
 async function onModelSelected(viewer, urn) {
     if (window.onModelSelectedTimeout) {
@@ -72,7 +92,11 @@ async function onModelSelected(viewer, urn) {
         if (!resp.ok) {
             throw new Error(await resp.text());
         }
+
+
         const status = await resp.json();
+
+        console.log('Translation status:', status);
         switch (status.status) {
             case 'n/a':
                 showNotification(`Model has not been translated.`);
@@ -84,6 +108,7 @@ async function onModelSelected(viewer, urn) {
             case 'failed':
                 showNotification(`Translation failed. <ul>${status.messages.map(msg => `<li>${JSON.stringify(msg)}</li>`).join('')}</ul>`);
                 break;
+
             default:
                 clearNotification();
                 loadModel(viewer, urn);
@@ -106,3 +131,13 @@ function clearNotification() {
     overlay.innerHTML = '';
     overlay.style.display = 'none';
 }
+
+document.getElementById('addLineBtn').onclick = async () => {
+    try {
+        const resp = await fetch('http://localhost:12345/addLine', { method: 'GET' });
+        const text = await resp.text();
+        alert(text);
+    } catch {
+        alert('Failed to connect to AutoCAD local server.');
+    }
+};

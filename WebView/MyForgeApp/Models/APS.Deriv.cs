@@ -13,7 +13,7 @@ public partial class APS
         return System.Convert.ToBase64String(plainTextBytes).TrimEnd('=');
     }
 
-    public async Task<Job> TranslateModel(string objectId, string rootFilename)
+    public async Task<Job> TranslateModel(string objectId, string rootFilename, bool isZip = false)
     {
         var auth = await GetInternalToken();
         var modelDerivativeClient = new ModelDerivativeClient();
@@ -34,7 +34,7 @@ public partial class APS
                 ]
             }
         };
-        if (!string.IsNullOrEmpty(rootFilename))
+        if (isZip && !string.IsNullOrEmpty(rootFilename))
         {
             payload.Input.RootFilename = rootFilename;
             payload.Input.CompressedUrn = true;
@@ -50,7 +50,25 @@ public partial class APS
         try
         {
             var manifest = await modelDerivativeClient.GetManifestAsync(urn, accessToken: auth.AccessToken);
-            return new TranslationStatus(manifest.Status, manifest.Progress, []);
+
+            // Extract messages from the manifest (e.g., errors, warnings, etc.)
+            var messages = new List<string>();
+
+            if (manifest.Derivatives != null)
+            {
+                foreach (var derivative in manifest.Derivatives)
+                {
+                    if (derivative.Messages != null)
+                    {
+                        foreach (var msg in derivative.Messages)
+                        {
+                            messages.Add($"{msg.Type}: {msg.Message}");
+                        }
+                    }
+                }
+            }
+
+            return new TranslationStatus(manifest.Status, manifest.Progress, messages);
         }
         catch (ModelDerivativeApiException ex)
         {

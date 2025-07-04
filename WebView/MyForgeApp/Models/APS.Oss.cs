@@ -2,8 +2,10 @@
 using System.Collections.Generic;
 using System.IO;
 using System.Threading.Tasks;
+using Autodesk.ModelDerivative.Model;
 using Autodesk.Oss;
 using Autodesk.Oss.Model;
+using Autodesk.SDKManager;
 
 public partial class APS
 {
@@ -24,7 +26,7 @@ public partial class APS
                     BucketKey = bucketKey,
                     PolicyKey = PolicyKey.Persistent
                 };
-                await ossClient.CreateBucketAsync(Region.US, payload, auth.AccessToken);
+                await ossClient.CreateBucketAsync(Autodesk.Oss.Model.Region.US, payload, auth.AccessToken);
             }
             else
             {
@@ -59,4 +61,12 @@ public partial class APS
         }
         return results;
     }
+
+    public async Task DeleteModel(string objectName)
+    {
+        var auth = await GetInternalToken();
+        var ossClient = new OssClient();
+        await ossClient.DeleteObjectAsync(_bucket, objectName, accessToken: auth.AccessToken);
+    }
+
 }
